@@ -142,9 +142,12 @@ body{
   width:28px;height:28px;border-radius:50%;
   border:2px solid rgba(255,255,255,0.2);
   background:transparent;
-  transition:all 0.2s;
+  transition:all 0.18s;
+  flex-shrink:0;
 }
-.tdot.on{border-color:rgba(255,255,255,0.6);background:rgba(255,255,255,0.6);box-shadow:0 0 10px rgba(255,255,255,0.25);}
+.tdot.armed{background:#c0392b;border-color:#e05040;box-shadow:0 0 12px rgba(192,57,43,0.7);}
+.tdot.playback{background:#27ae60;border-color:#2ecc71;box-shadow:0 0 10px rgba(39,174,96,0.6);}
+.tdot.off{background:#1a1a1a;border-color:rgba(255,255,255,0.15);box-shadow:none;}
 .track-body{flex:1;padding:11px 12px 11px 14px;display:flex;flex-direction:column;gap:5px;}
 .track-lbl{font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;opacity:0.7;}
 .wf-box{height:36px;border-radius:6px;overflow:hidden;background:rgba(0,0,0,0.2);position:relative;}
@@ -747,7 +750,7 @@ function addTrack() {
   const tid = trackCtr;
   const color = TRACK_COLORS[(tid - 1) % TRACK_COLORS.length];
   const gainNode = audioCtx.createGain(); gainNode.gain.value = 0.8;
-  const track = { id: tid, buf: null, gainNode, color, enabled: true, isRec: false, mr: null, chunks: [], ms: null, name: 'Track ' + tid };
+  const track = { id: tid, buf: null, gainNode, color, state: 'armed', isRec: false, mr: null, chunks: [], ms: null, name: 'Track ' + tid };
   tracks.push(track);
 
   const bgColor = color + 'f2'; // very opaque so waveform is readable
@@ -757,7 +760,7 @@ function addTrack() {
   div.innerHTML = `
     <div class="track-inner">
       <div class="track-toggle" id="tog-${tid}">
-        <div class="tdot on" id="dot-${tid}"></div>
+        <div class="tdot armed" id="dot-${tid}"></div>
       </div>
       <div class="track-body">
         <div class="track-lbl" id="lbl-${tid}" style="color:rgba(255,255,255,0.55);cursor:text;">${track.name}</div>
@@ -773,21 +776,16 @@ function addTrack() {
   `;
   document.getElementById('tracks').appendChild(div);
 
-  // toggle on/off
-  document.getElementById(`tog-${tid}`).addEventListener('click', () => {
-    track.enabled = !track.enabled;
+  // three-state toggle: armed (red) → play (green) → off (black) → armed
+  function setTrackState(state) {
+    track.state = state;
     const dot = document.getElementById(`dot-${tid}`);
-    if (track.enabled) {
-      dot.style.background = 'rgba(255,255,255,0.6)';
-      dot.style.borderColor = 'rgba(255,255,255,0.6)';
-      dot.style.boxShadow = '0 0 10px rgba(255,255,255,0.25)';
-      gainNode.gain.value = 0.8;
-    } else {
-      dot.style.background = 'transparent';
-      dot.style.borderColor = 'rgba(255,255,255,0.2)';
-      dot.style.boxShadow = 'none';
-      gainNode.gain.value = 0;
-    }
+    dot.className = 'tdot ' + state;
+    gainNode.gain.value = state === 'off' ? 0 : 0.8;
+  }
+  document.getElementById(`tog-${tid}`).addEventListener('click', () => {
+    const next = track.state === 'armed' ? 'play' : track.state === 'play' ? 'off' : 'armed';
+    setTrackState(next);
   });
 
   // rename track label inline
@@ -838,49 +836,81 @@ function runCountIn() {
 }
 
 // ── RECORD ──
+let armedRecorders = [];
+
+function setTrackStateById(id, state) {
+  const track = tracks.find(t => t.id === id);
+  if (!track) return;
+  track.state = state;
+  const dot = document.getElementById(`dot-${id}`);
+  if (dot) dot.className = 'tdot ' + state;
+  track.gainNode.gain.value = state === 'off' ? 0 : 0.8;
+}
+
 document.getElementById('rec-btn').addEventListener('click', async () => {
   await ensureRunning();
+
   if (isRecording) {
-    currentRecTrack?.mr?.stop();
-    currentRecTrack?.ms?.getTracks().forEach(t => t.stop());
+    armedRecorders.forEach(({ mr, ms }) => { try { mr.stop(); } catch(e){} ms.getTracks().forEach(t => t.stop()); });
+    armedRecorders = [];
     isRecording = false; currentRecTrack = null;
     document.getElementById('rec-btn').classList.remove('recording');
     document.querySelectorAll('.track.rec-now').forEach(el => el.classList.remove('rec-now'));
     stopAll(); showStatus('Recording saved'); return;
   }
-  const track = addTrack(); if (!track) return;
+
+  // use armed tracks, or create a new one
+  let armedTracks = tracks.filter(t => t.state === 'armed');
+  if (!armedTracks.length) {
+    const t = addTrack(); if (!t) return;
+    armedTracks = [t];
+  }
+
   if (countInOn) await runCountIn();
   if (!navigator.mediaDevices?.getUserMedia) { showStatus('Microphone not supported'); return; }
+
   try {
-    track.ms = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-    const mime = detectMime(); let mr;
-    try { mr = new MediaRecorder(track.ms, mime ? { mimeType: mime } : {}); } catch(e) { mr = new MediaRecorder(track.ms); }
-    track.mr = mr; track.chunks = [];
-    mr.ondataavailable = e => { if (e.data?.size > 0) track.chunks.push(e.data); };
-    mr.onstop = async () => {
-      const blob = new Blob(track.chunks, { type: mr.mimeType || 'audio/mp4' });
-      try {
-        const raw = await audioCtx.decodeAudioData(await blob.arrayBuffer());
-        track.buf = applyTape(raw);
-        document.getElementById(`wfe-${track.id}`).style.display = 'none';
-        drawWF(document.getElementById(`wf-${track.id}`), track.buf, 'rgba(255,255,255,0.85)');
-      } catch(e) { showStatus('Could not decode audio'); }
-    };
-    mr.start(100); isRecording = true; currentRecTrack = track;
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    const mime = detectMime();
+    armedRecorders = [];
+
+    for (const track of armedTracks) {
+      track.ms = stream; track.chunks = [];
+      let mr;
+      try { mr = new MediaRecorder(stream, mime ? { mimeType: mime } : {}); } catch(e) { mr = new MediaRecorder(stream); }
+      track.mr = mr;
+      mr.ondataavailable = e => { if (e.data?.size > 0) track.chunks.push(e.data); };
+      mr.onstop = async () => {
+        const blob = new Blob(track.chunks, { type: mr.mimeType || 'audio/mp4' });
+        try {
+          const raw = await audioCtx.decodeAudioData(await blob.arrayBuffer());
+          track.buf = applyTape(raw);
+          document.getElementById(`wfe-${track.id}`).style.display = 'none';
+          drawWF(document.getElementById(`wf-${track.id}`), track.buf, 'rgba(255,255,255,0.85)');
+          setTrackStateById(track.id, 'play');
+        } catch(e) { showStatus('Could not decode audio'); }
+      };
+      mr.start(100);
+      armedRecorders.push({ mr, ms: stream });
+      document.getElementById(`trk-${track.id}`).classList.add('rec-now');
+    }
+
+    isRecording = true; currentRecTrack = armedTracks[0];
     document.getElementById('rec-btn').classList.add('recording');
-    document.getElementById(`trk-${track.id}`).classList.add('rec-now');
-    // play others
+
+    // play back 'play' state tracks alongside
     activeSrcs.forEach(s => { try { s.stop(); } catch(e){} }); activeSrcs = [];
-    const others = tracks.filter(t => t.id !== track.id && t.buf && t.enabled);
-    if (others.length) {
-      others.forEach(t => { const src = audioCtx.createBufferSource(); src.buffer = t.buf; buildChain(src, t.gainNode); src.start(0); activeSrcs.push(src); });
+    const playTracks = tracks.filter(t => t.state === 'play' && t.buf);
+    if (playTracks.length) {
+      playTracks.forEach(t => {
+        const src = audioCtx.createBufferSource();
+        src.buffer = t.buf; buildChain(src, t.gainNode); src.start(0); activeSrcs.push(src);
+      });
       isPlaying = true; playStart = audioCtx.currentTime; updatePlayBtn();
     }
     showStatus('Recording — tap ● to stop', 99999);
   } catch(err) {
     showStatus(err.name === 'NotAllowedError' ? 'Mic denied — check Settings > Safari' : 'Microphone error', 5000);
-    tracks = tracks.filter(t => t.id !== track.id);
-    document.getElementById(`trk-${track.id}`)?.remove();
   }
 });
 
@@ -897,7 +927,7 @@ function updatePlayBtn() {
 document.getElementById('btn-play').addEventListener('click', async () => {
   await ensureRunning();
   if (isPlaying) { stopAll(); showStatus('Stopped'); return; }
-  const toPlay = tracks.filter(t => t.buf && t.enabled);
+  const toPlay = tracks.filter(t => t.buf && t.state !== 'off');
   if (!toPlay.length) { showStatus('Nothing recorded yet'); return; }
   toPlay.forEach(t => { const src = audioCtx.createBufferSource(); src.buffer = t.buf; buildChain(src, t.gainNode); src.start(0); activeSrcs.push(src); });
   isPlaying = true; playStart = audioCtx.currentTime; updatePlayBtn();
@@ -964,7 +994,7 @@ document.getElementById('open-export-btn').addEventListener('click', () => {
 document.getElementById('export-mix-btn').addEventListener('click', () => {
   const song = songs.find(s => s.id === currentSongId);
   const songName = song ? song.name : 'Voice Demo';
-  const bufs = tracks.filter(t => t.buf && t.enabled).map(t => t.buf);
+  const bufs = tracks.filter(t => t.buf && t.state !== 'off').map(t => t.buf);
   if (!bufs.length) { showStatus('Nothing to export'); return; }
   const wav = bufferToWav(bufs);
   downloadBlob(wav, `${songName} - Mix.wav`);
