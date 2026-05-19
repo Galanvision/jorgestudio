@@ -153,15 +153,33 @@ body{
 .wf-box{height:36px;border-radius:6px;overflow:hidden;background:rgba(0,0,0,0.2);position:relative;}
 .wf-canvas{width:100%;height:36px;display:block;}
 .wf-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--text-dim);letter-spacing:1px;}
-.track-del{
+.track-menu-btn{
   width:46px;min-height:74px;
   display:flex;align-items:center;justify-content:center;
   cursor:pointer;touch-action:manipulation;
-  color:var(--text-dim);font-size:18px;
+  color:rgba(255,255,255,0.35);font-size:20px;letter-spacing:1px;
   border-left:1px solid rgba(255,255,255,0.07);
   flex-shrink:0;transition:color 0.15s;
+  user-select:none;
 }
-.track-del:active{color:var(--red);}
+.track-menu-btn:active{color:rgba(255,255,255,0.7);}
+/* track context popover */
+.track-popover{
+  position:fixed;
+  background:rgba(28,22,36,0.97);
+  border:1px solid rgba(255,255,255,0.12);
+  border-radius:14px;
+  overflow:hidden;
+  z-index:500;
+  min-width:160px;
+  box-shadow:0 8px 32px rgba(0,0,0,0.7);
+  opacity:0;pointer-events:none;transition:opacity 0.15s;
+}
+.track-popover.show{opacity:1;pointer-events:all;}
+.tp-item{padding:14px 18px;font-size:15px;cursor:pointer;touch-action:manipulation;display:flex;align-items:center;gap:10px;transition:background 0.1s;color:var(--text);}
+.tp-item:active{background:rgba(255,255,255,0.08);}
+.tp-item.danger{color:#e05050;}
+.tp-sep{height:1px;background:rgba(255,255,255,0.07);}
 
 .add-track-btn{
   margin:4px 14px 0;height:54px;
@@ -191,36 +209,37 @@ body{
 
 /* TRANSPORT */
 .transport{
-  margin:16px 14px 0;
-  display:flex;align-items:center;justify-content:space-between;
-  flex-shrink:0;padding-bottom:env(safe-area-inset-bottom, 16px);
+  margin:14px 14px 0;
+  display:flex;align-items:center;justify-content:space-between;gap:10px;
+  flex-shrink:0;padding-bottom:env(safe-area-inset-bottom,20px);
 }
-.trans-side{display:flex;gap:14px;align-items:center;flex:1;}
-.trans-side.right{justify-content:flex-end;}
 .tbtn{
-  width:54px;height:54px;border-radius:50%;
+  width:62px;height:62px;border-radius:50%;
   background:var(--surface2);border:none;
   display:flex;align-items:center;justify-content:center;
   cursor:pointer;touch-action:manipulation;color:var(--text-mid);
   transition:all 0.15s;
   backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+  flex-shrink:0;
 }
 .tbtn:active{transform:scale(0.9);}
-.tbtn svg{width:21px;height:21px;}
+.tbtn svg{width:24px;height:24px;}
+.tbtn.playing{color:#27ae60;}
 .rec-btn{
-  width:84px;height:84px;border-radius:50%;
+  width:90px;height:90px;border-radius:50%;
   background:var(--red);
   border:4px solid rgba(255,255,255,0.13);
   display:flex;align-items:center;justify-content:center;
   cursor:pointer;touch-action:manipulation;
   transition:all 0.15s;
   box-shadow:0 4px 20px rgba(192,57,43,0.5);
+  flex-shrink:0;
 }
 .rec-btn:active{transform:scale(0.91);}
 .rec-btn.recording{animation:rpulse 1.4s ease-in-out infinite;}
-.rec-inner{width:34px;height:34px;border-radius:50%;background:#fff;transition:all 0.2s;}
-.rec-btn.recording .rec-inner{border-radius:7px;width:28px;height:28px;}
-@keyframes rpulse{0%{box-shadow:0 4px 20px rgba(192,57,43,0.5),0 0 0 0 var(--red-glow);}60%{box-shadow:0 4px 20px rgba(192,57,43,0.5),0 0 0 20px transparent;}100%{box-shadow:0 4px 20px rgba(192,57,43,0.5),0 0 0 0 transparent;}}
+.rec-inner{width:36px;height:36px;border-radius:50%;background:#fff;transition:all 0.2s;}
+.rec-btn.recording .rec-inner{border-radius:8px;width:30px;height:30px;}
+@keyframes rpulse{0%{box-shadow:0 4px 20px rgba(192,57,43,0.5),0 0 0 0 var(--red-glow);}60%{box-shadow:0 4px 20px rgba(192,57,43,0.5),0 0 0 22px transparent;}100%{box-shadow:0 4px 20px rgba(192,57,43,0.5),0 0 0 0 transparent;}}
 
 /* MODAL */
 .modal-bg{
@@ -367,17 +386,19 @@ body{
   </div>
 
   <div class="transport">
-    <div class="trans-side left">
-      <button class="tbtn" id="btn-rew">
-        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M11 18V6l-8.5 6L11 18zm.5-6 8.5 6V6l-8.5 6z"/></svg>
-      </button>
-    </div>
+    <button class="tbtn" id="btn-rew" title="Rewind">
+      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>
+    </button>
+    <button class="tbtn" id="btn-back" title="Skip back">
+      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M11 18V6l-8.5 6L11 18zm.5-6 8.5 6V6l-8.5 6z"/></svg>
+    </button>
     <button class="rec-btn" id="rec-btn"><div class="rec-inner"></div></button>
-    <div class="trans-side right">
-      <button class="tbtn" id="btn-play">
-        <svg viewBox="0 0 24 24" fill="currentColor" id="play-icon"><path d="M8 5v14l11-7z"/></svg>
-      </button>
-    </div>
+    <button class="tbtn" id="btn-play" title="Play / Pause">
+      <svg viewBox="0 0 24 24" fill="currentColor" id="play-icon"><path d="M8 5v14l11-7z"/></svg>
+    </button>
+    <button class="tbtn" id="btn-stop" title="Stop">
+      <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+    </button>
   </div>
 </div>
 
@@ -435,6 +456,15 @@ body{
   <div class="ctx-item" id="ctx-rename">✏️ Rename</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item danger" id="ctx-delete">🗑 Delete</div>
+</div>
+
+<!-- TRACK POPOVER -->
+<div class="track-popover" id="track-popover">
+  <div class="tp-item" id="tp-undo">↩ Undo Recording</div>
+  <div class="tp-sep"></div>
+  <div class="tp-item" id="tp-export">↑ Export Track</div>
+  <div class="tp-sep"></div>
+  <div class="tp-item danger" id="tp-delete">🗑 Delete Track</div>
 </div>
 
 <!-- COUNTDOWN -->
@@ -769,9 +799,7 @@ function addTrack() {
           <div class="wf-empty" id="wfe-${tid}">No recording</div>
         </div>
       </div>
-      <div class="track-del" id="del-${tid}" style="color:rgba(255,255,255,0.3);">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>
-      </div>
+      <div class="track-menu-btn" id="tmenu-${tid}">···</div>
     </div>
   `;
   document.getElementById('tracks').appendChild(div);
@@ -812,8 +840,18 @@ function addTrack() {
   }
   attachRename(document.getElementById(`lbl-${tid}`));
 
-  document.getElementById(`del-${tid}`).addEventListener('click', () => {
-    tracks = tracks.filter(t => t.id !== tid); div.remove(); updateSongMeta();
+  // three-dot track menu
+  let prevBuf = null; // for undo
+  document.getElementById(`tmenu-${tid}`).addEventListener('click', (e) => {
+    e.stopPropagation();
+    const popover = document.getElementById('track-popover');
+    const rect = e.currentTarget.getBoundingClientRect();
+    popover.style.right = '14px';
+    popover.style.top = Math.min(rect.top - 130, window.innerHeight - 200) + 'px';
+    popover.dataset.tid = tid;
+    const isOpen = popover.classList.contains('show') && popover.dataset.tid == tid;
+    document.querySelectorAll('.track-popover').forEach(p => p.classList.remove('show'));
+    if (!isOpen) popover.classList.add('show');
   });
 
   updateSongMeta();
@@ -884,6 +922,7 @@ document.getElementById('rec-btn').addEventListener('click', async () => {
         const blob = new Blob(track.chunks, { type: mr.mimeType || 'audio/mp4' });
         try {
           const raw = await audioCtx.decodeAudioData(await blob.arrayBuffer());
+          track._prevBuf = track.buf || null; // save for undo
           track.buf = applyTape(raw);
           document.getElementById(`wfe-${track.id}`).style.display = 'none';
           drawWF(document.getElementById(`wf-${track.id}`), track.buf, 'rgba(255,255,255,0.85)');
@@ -1003,6 +1042,79 @@ document.getElementById('export-mix-btn').addEventListener('click', () => {
 });
 document.getElementById('export-close').addEventListener('click', () => document.getElementById('export-modal').classList.remove('open'));
 document.getElementById('export-modal').addEventListener('click', e => { if (e.target === document.getElementById('export-modal')) document.getElementById('export-modal').classList.remove('open'); });
+
+// ── TRACK POPOVER ACTIONS ──
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('#track-popover') && !e.target.closest('.track-menu-btn')) {
+    document.getElementById('track-popover').classList.remove('show');
+  }
+});
+
+document.getElementById('tp-undo').addEventListener('click', () => {
+  const popover = document.getElementById('track-popover');
+  const tid = parseInt(popover.dataset.tid);
+  const track = tracks.find(t => t.id === tid);
+  popover.classList.remove('show');
+  if (!track) return;
+  if (track._prevBuf) {
+    track.buf = track._prevBuf;
+    track._prevBuf = null;
+    drawWF(document.getElementById(`wf-${tid}`), track.buf, 'rgba(255,255,255,0.85)');
+    showStatus('Recording undone');
+  } else if (track.buf) {
+    track.buf = null;
+    const canvas = document.getElementById(`wf-${tid}`);
+    const ctx = canvas.getContext('2d'); ctx.clearRect(0,0,canvas.width,canvas.height);
+    document.getElementById(`wfe-${tid}`).style.display = '';
+    setTrackStateById(tid, 'armed');
+    showStatus('Recording cleared');
+  } else { showStatus('Nothing to undo'); }
+});
+
+document.getElementById('tp-export').addEventListener('click', () => {
+  const popover = document.getElementById('track-popover');
+  const tid = parseInt(popover.dataset.tid);
+  popover.classList.remove('show');
+  const track = tracks.find(t => t.id === tid);
+  if (!track?.buf) { showStatus('Nothing recorded on this track'); return; }
+  const song = songs.find(s => s.id === currentSongId);
+  const songName = song ? song.name : 'Voice Demo';
+  const wav = singleBufToWav(track.buf);
+  downloadBlob(wav, `${songName} - ${track.name}.wav`);
+  showStatus('Exporting ' + track.name + '…');
+});
+
+document.getElementById('tp-delete').addEventListener('click', () => {
+  const popover = document.getElementById('track-popover');
+  const tid = parseInt(popover.dataset.tid);
+  popover.classList.remove('show');
+  tracks = tracks.filter(t => t.id !== tid);
+  document.getElementById(`trk-${tid}`)?.remove();
+  updateSongMeta();
+  showStatus('Track deleted');
+});
+
+// ── STOP BUTTON ──
+document.getElementById('btn-stop').addEventListener('click', async () => {
+  await ensureRunning();
+  if (isRecording) {
+    armedRecorders.forEach(({ mr, ms }) => { try { mr.stop(); } catch(e){} ms.getTracks().forEach(t => t.stop()); });
+    armedRecorders = [];
+    isRecording = false; currentRecTrack = null;
+    document.getElementById('rec-btn').classList.remove('recording');
+    document.querySelectorAll('.track.rec-now').forEach(el => el.classList.remove('rec-now'));
+    showStatus('Recording stopped');
+  }
+  stopAll();
+});
+
+// ── BACK BUTTON (skip back 5s, or rewind if at start) ──
+document.getElementById('btn-back').addEventListener('click', async () => {
+  await ensureRunning();
+  stopAll();
+  document.getElementById('counter').textContent = '0:00.00';
+  showStatus('Rewound');
+});
 
 // ── COUNTER ──
 setInterval(() => {
