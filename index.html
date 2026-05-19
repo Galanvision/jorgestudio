@@ -133,18 +133,18 @@ body{
 .track.rec-now{border-color:var(--red);box-shadow:0 0 0 1px var(--red);}
 .track-inner{display:flex;align-items:center;}
 .track-toggle{
-  width:54px;min-height:74px;
+  width:64px;min-height:74px;
   display:flex;align-items:center;justify-content:center;
   cursor:pointer;touch-action:manipulation;flex-shrink:0;
   border-right:1px solid rgba(255,255,255,0.07);
 }
 .tdot{
-  width:13px;height:13px;border-radius:50%;
+  width:28px;height:28px;border-radius:50%;
   border:2px solid rgba(255,255,255,0.2);
   background:transparent;
   transition:all 0.2s;
 }
-.tdot.on{border-color:var(--tc);background:var(--tc);box-shadow:0 0 9px var(--tc);}
+.tdot.on{border-color:rgba(255,255,255,0.6);background:rgba(255,255,255,0.6);box-shadow:0 0 10px rgba(255,255,255,0.25);}
 .track-body{flex:1;padding:11px 12px 11px 14px;display:flex;flex-direction:column;gap:5px;}
 .track-lbl{font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;opacity:0.7;}
 .wf-box{height:36px;border-radius:6px;overflow:hidden;background:rgba(0,0,0,0.2);position:relative;}
@@ -440,14 +440,14 @@ body{
 
 <script>
 const TRACK_COLORS = [
-  '#5a6644',  // olive green
-  '#8a7a2a',  // mustard yellow
-  '#b06a28',  // amber orange
-  '#7a2a2a',  // maroon
-  '#6a4a2a',  // brown
-  '#5a5a60',  // grey
-  '#7a5a5a',  // puce
-  '#2a3a5a',  // midnight blue
+  '#2e3822',  // olive green
+  '#3a3218',  // mustard yellow
+  '#3a2810',  // amber orange
+  '#2e1414',  // maroon
+  '#281e10',  // brown
+  '#222228',  // grey
+  '#2a1e1e',  // puce
+  '#101828',  // midnight blue
 ];
 
 // ── STATE ──
@@ -750,40 +750,69 @@ function addTrack() {
   const track = { id: tid, buf: null, gainNode, color, enabled: true, isRec: false, mr: null, chunks: [], ms: null, name: 'Track ' + tid };
   tracks.push(track);
 
-  const bgColor = color + 'cc'; // slightly transparent solid
+  const bgColor = color + 'f2'; // very opaque so waveform is readable
   const div = document.createElement('div');
   div.className = 'track'; div.id = `trk-${tid}`;
   div.style.background = bgColor;
   div.innerHTML = `
     <div class="track-inner">
       <div class="track-toggle" id="tog-${tid}">
-        <div class="tdot on" id="dot-${tid}" style="border-color:rgba(255,255,255,0.7);background:rgba(255,255,255,0.7);box-shadow:0 0 8px rgba(255,255,255,0.4);"></div>
+        <div class="tdot on" id="dot-${tid}"></div>
       </div>
       <div class="track-body">
-        <div class="track-lbl" style="color:rgba(255,255,255,0.7);">${track.name}</div>
+        <div class="track-lbl" id="lbl-${tid}" style="color:rgba(255,255,255,0.55);cursor:text;">${track.name}</div>
         <div class="wf-box">
           <canvas class="wf-canvas" id="wf-${tid}"></canvas>
           <div class="wf-empty" id="wfe-${tid}">No recording</div>
         </div>
       </div>
-      <div class="track-del" id="del-${tid}" style="color:rgba(255,255,255,0.4);">
+      <div class="track-del" id="del-${tid}" style="color:rgba(255,255,255,0.3);">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>
       </div>
     </div>
   `;
   document.getElementById('tracks').appendChild(div);
 
+  // toggle on/off
   document.getElementById(`tog-${tid}`).addEventListener('click', () => {
     track.enabled = !track.enabled;
     const dot = document.getElementById(`dot-${tid}`);
     if (track.enabled) {
-      dot.style.borderColor = 'rgba(255,255,255,0.7)'; dot.style.background = 'rgba(255,255,255,0.7)'; dot.style.boxShadow = '0 0 8px rgba(255,255,255,0.4)';
+      dot.style.background = 'rgba(255,255,255,0.6)';
+      dot.style.borderColor = 'rgba(255,255,255,0.6)';
+      dot.style.boxShadow = '0 0 10px rgba(255,255,255,0.25)';
       gainNode.gain.value = 0.8;
     } else {
-      dot.style.borderColor = 'rgba(255,255,255,0.2)'; dot.style.background = 'transparent'; dot.style.boxShadow = 'none';
+      dot.style.background = 'transparent';
+      dot.style.borderColor = 'rgba(255,255,255,0.2)';
+      dot.style.boxShadow = 'none';
       gainNode.gain.value = 0;
     }
   });
+
+  // rename track label inline
+  function attachRename(lblEl) {
+    lblEl.addEventListener('click', function onLblClick() {
+      const input = document.createElement('input');
+      input.value = track.name;
+      input.style.cssText = 'font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;background:transparent;border:none;outline:none;border-bottom:1px solid rgba(255,255,255,0.4);color:rgba(255,255,255,0.55);font-family:inherit;width:100%;';
+      lblEl.replaceWith(input);
+      input.focus(); input.select();
+      function finish() {
+        const val = input.value.trim() || track.name;
+        track.name = val;
+        const newLbl = document.createElement('div');
+        newLbl.className = 'track-lbl'; newLbl.id = `lbl-${tid}`;
+        newLbl.style.cssText = 'color:rgba(255,255,255,0.55);cursor:text;';
+        newLbl.textContent = val;
+        input.replaceWith(newLbl);
+        attachRename(newLbl);
+      }
+      input.addEventListener('blur', finish);
+      input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); input.blur(); } });
+    });
+  }
+  attachRename(document.getElementById(`lbl-${tid}`));
 
   document.getElementById(`del-${tid}`).addEventListener('click', () => {
     tracks = tracks.filter(t => t.id !== tid); div.remove(); updateSongMeta();
