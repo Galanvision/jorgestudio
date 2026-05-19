@@ -121,6 +121,7 @@ body{
   flex:1;padding:6px 14px;
   overflow-y:auto;-webkit-overflow-scrolling:touch;
   display:flex;flex-direction:column;gap:8px;
+  min-height:0;
 }
 .tracks-scroll::-webkit-scrollbar{display:none;}
 
@@ -146,7 +147,7 @@ body{
   flex-shrink:0;
 }
 .tdot.armed{background:#c0392b;border-color:#e05040;box-shadow:0 0 12px rgba(192,57,43,0.7);}
-.tdot.playback{background:#27ae60;border-color:#2ecc71;box-shadow:0 0 10px rgba(39,174,96,0.6);}
+.tdot.playback{background:#00ff6a;border-color:#00ff6a;box-shadow:0 0 14px rgba(0,255,106,0.9),0 0 4px #fff;}
 .tdot.off{background:#1a1a1a;border-color:rgba(255,255,255,0.15);box-shadow:none;}
 .track-body{flex:1;padding:11px 12px 11px 14px;display:flex;flex-direction:column;gap:5px;}
 .track-lbl{font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;opacity:0.7;}
@@ -208,38 +209,44 @@ body{
 .sblock-unit{font-size:10px;color:var(--text-dim);font-weight:400;margin-left:2px;}
 
 /* TRANSPORT */
+.transport-wrap{
+  flex-shrink:0;
+  background:rgba(8,6,12,0.96);
+  border-top:1px solid rgba(255,255,255,0.06);
+  padding:12px 14px;
+  padding-bottom:max(12px, env(safe-area-inset-bottom));
+}
 .transport{
-  margin:14px 14px 0;
-  display:flex;align-items:center;justify-content:space-between;gap:10px;
-  flex-shrink:0;padding-bottom:env(safe-area-inset-bottom,20px);
+  display:flex;align-items:center;justify-content:center;gap:8px;
 }
 .tbtn{
-  width:62px;height:62px;border-radius:50%;
-  background:var(--surface2);border:none;
-  display:flex;align-items:center;justify-content:center;
-  cursor:pointer;touch-action:manipulation;color:var(--text-mid);
-  transition:all 0.15s;
-  backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
-  flex-shrink:0;
-}
-.tbtn:active{transform:scale(0.9);}
-.tbtn svg{width:24px;height:24px;}
-.tbtn.playing{color:#27ae60;}
-.rec-btn{
-  width:90px;height:90px;border-radius:50%;
-  background:var(--red);
-  border:4px solid rgba(255,255,255,0.13);
+  flex:1;height:58px;
+  border-radius:10px;
+  background:linear-gradient(to bottom,#2a2a2a,#1a1a1a);
+  border:1px solid rgba(255,255,255,0.08);
   display:flex;align-items:center;justify-content:center;
   cursor:pointer;touch-action:manipulation;
-  transition:all 0.15s;
-  box-shadow:0 4px 20px rgba(192,57,43,0.5);
-  flex-shrink:0;
+  transition:all 0.1s;
+  box-shadow:0 2px 8px rgba(0,0,0,0.5),inset 0 1px 0 rgba(255,255,255,0.05);
 }
-.rec-btn:active{transform:scale(0.91);}
-.rec-btn.recording{animation:rpulse 1.4s ease-in-out infinite;}
-.rec-inner{width:36px;height:36px;border-radius:50%;background:#fff;transition:all 0.2s;}
-.rec-btn.recording .rec-inner{border-radius:8px;width:30px;height:30px;}
-@keyframes rpulse{0%{box-shadow:0 4px 20px rgba(192,57,43,0.5),0 0 0 0 var(--red-glow);}60%{box-shadow:0 4px 20px rgba(192,57,43,0.5),0 0 0 22px transparent;}100%{box-shadow:0 4px 20px rgba(192,57,43,0.5),0 0 0 0 transparent;}}
+.tbtn:active{background:linear-gradient(to bottom,#1a1a1a,#111);transform:translateY(1px);box-shadow:inset 0 2px 4px rgba(0,0,0,0.5);}
+.tbtn svg{width:22px;height:22px;}
+.tbtn.active-play svg{filter:drop-shadow(0 0 4px #27ae60);}
+.rec-btn{
+  flex:1;height:58px;
+  border-radius:10px;
+  background:linear-gradient(to bottom,#2a2a2a,#1a1a1a);
+  border:1px solid rgba(255,255,255,0.08);
+  display:flex;align-items:center;justify-content:center;
+  cursor:pointer;touch-action:manipulation;
+  transition:all 0.1s;
+  box-shadow:0 2px 8px rgba(0,0,0,0.5),inset 0 1px 0 rgba(255,255,255,0.05);
+}
+.rec-btn:active{background:linear-gradient(to bottom,#1a1a1a,#111);transform:translateY(1px);}
+.rec-btn.recording{background:linear-gradient(to bottom,#3a0808,#280404);border-color:rgba(192,57,43,0.4);animation:rpulse 1.4s ease-in-out infinite;}
+.rec-dot{width:22px;height:22px;border-radius:50%;background:#c0392b;box-shadow:0 0 8px rgba(192,57,43,0.8);transition:all 0.2s;}
+.rec-btn.recording .rec-dot{box-shadow:0 0 14px rgba(192,57,43,1),0 0 4px #fff;}
+@keyframes rpulse{0%{box-shadow:0 2px 8px rgba(0,0,0,0.5),0 0 0 0 rgba(192,57,43,0.5);}60%{box-shadow:0 2px 8px rgba(0,0,0,0.5),0 0 0 12px transparent;}100%{box-shadow:0 2px 8px rgba(0,0,0,0.5),0 0 0 0 transparent;}}
 
 /* MODAL */
 .modal-bg{
@@ -385,20 +392,21 @@ body{
     </div>
   </div>
 
-  <div class="transport">
-    <button class="tbtn" id="btn-rew" title="Rewind">
-      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>
-    </button>
-    <button class="tbtn" id="btn-back" title="Skip back">
-      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M11 18V6l-8.5 6L11 18zm.5-6 8.5 6V6l-8.5 6z"/></svg>
-    </button>
-    <button class="rec-btn" id="rec-btn"><div class="rec-inner"></div></button>
-    <button class="tbtn" id="btn-play" title="Play / Pause">
-      <svg viewBox="0 0 24 24" fill="currentColor" id="play-icon"><path d="M8 5v14l11-7z"/></svg>
-    </button>
-    <button class="tbtn" id="btn-stop" title="Stop">
-      <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
-    </button>
+  <div class="transport-wrap">
+    <div class="transport">
+      <button class="tbtn" id="btn-rew" title="Return to zero">
+        <svg viewBox="0 0 24 24" fill="white" width="22" height="22"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>
+      </button>
+      <button class="tbtn" id="btn-stop" title="Stop">
+        <svg viewBox="0 0 24 24" fill="none" width="22" height="22"><rect x="5" y="5" width="14" height="14" rx="1.5" fill="#3a6eaa"/></svg>
+      </button>
+      <button class="tbtn" id="btn-play" title="Play">
+        <svg viewBox="0 0 24 24" fill="none" width="22" height="22" id="play-icon-wrap"><path d="M7 5l13 7-13 7V5z" fill="#27ae60" id="play-path"/></svg>
+      </button>
+      <button class="rec-btn" id="rec-btn" title="Record">
+        <div class="rec-dot"></div>
+      </button>
+    </div>
   </div>
 </div>
 
@@ -959,9 +967,15 @@ function stopAll() {
   isPlaying = false; updatePlayBtn();
 }
 function updatePlayBtn() {
-  document.getElementById('play-icon').innerHTML = isPlaying
-    ? '<path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>'
-    : '<path d="M8 5v14l11-7z"/>';
+  const path = document.getElementById('play-path');
+  if (!path) return;
+  if (isPlaying) {
+    path.setAttribute('d','M6 19h4V5H6v14zm8-14v14h4V5h-4z');
+    path.setAttribute('fill','#00ff6a');
+  } else {
+    path.setAttribute('d','M7 5l13 7-13 7V5z');
+    path.setAttribute('fill','#27ae60');
+  }
 }
 document.getElementById('btn-play').addEventListener('click', async () => {
   await ensureRunning();
@@ -1109,7 +1123,7 @@ document.getElementById('btn-stop').addEventListener('click', async () => {
 });
 
 // ── BACK BUTTON (skip back 5s, or rewind if at start) ──
-document.getElementById('btn-back').addEventListener('click', async () => {
+document.getElementById('btn-rew').addEventListener('click', async () => {
   await ensureRunning();
   stopAll();
   document.getElementById('counter').textContent = '0:00.00';
