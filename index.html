@@ -620,39 +620,78 @@ function drawWave(i,progress){
 
 let recArmed=false;
 let overdubStartOffset=0;
-let recActxStartTime=0; // audio clock when MediaRecorder.start() was called
+let recActxStartTime=0;
+let micSource=null,micAnalyser=null,micAnalyserData=null;
+
+async function spokenCountIn(){
+  return new Promise(res=>{
+    if(!window.speechSynthesis){res();return;}
+    const bd=60/cfg.tempo;
+    const ctx=getCtx();
+    // Load voices — Chrome lazy-loads them
+    let voices=speechSynthesis.getVoices();
+    function pickVoice(){
+      voices=speechSynthesis.getVoices();
+      return voices.find(v=>/female|woman|samantha|victoria|karen|moira|tessa|fiona|google us|google uk/i.test(v.name))||voices[0];
+    }
+    function speakAt(text,delayMs,onDone){
+      setTimeout(()=>{
+        speechSynthesis.cancel();
+        const u=new SpeechSynthesisUtterance(text);
+        u.rate=Math.max(0.85,Math.min(2.2,(cfg.tempo/76)*1.05));
+        u.pitch=1.15;u.volume=1;
+        const v=pickVoice();if(v)u.voice=v;
+        if(onDone)u.onend=onDone;
+        speechSynthesis.speak(u);
+      },delayMs);
+    }
+    const msPerBeat=(60/cfg.tempo)*1000;
+    // "One" on beat 1, "Two" on beat 2, "One two three four" on beat 3 (as a phrase)
+    speakAt('One',50);
+    speakAt('Two',msPerBeat+50);
+    speakAt('One, two, three, four',msPerBeat*2+50,()=>{
+      setTimeout(res,200);
+    });
+    // Safety fallback
+    setTimeout(res,msPerBeat*6+600);
+  });
+}
 
 async function startRecording(){
   const ctx=getCtx();if(ctx.state==='suspended')await ctx.resume();
   const ri=tracks.findIndex(t=>t.state==='record');
   if(ri<0){setStatus('Set a track to R first');document.getElementById('btn-rec').classList.remove('armed');recArmed=false;return;}
   let stream;
-  // Use echo cancellation so playback doesn't bleed into mic without headphones
   try{stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:false,autoGainControl:false}});}
   catch(e){setStatus('Microphone access denied');document.getElementById('btn-rec').classList.remove('armed');recArmed=false;return;}
-  if(cfg.countin)await doCountIn();
+
+  if(cfg.countin){
+    setStatus('Count-in…');
+    stopSources();stopMetro();
+    if(speechSynthesis.getVoices().length===0)
+      await new Promise(r=>{speechSynthesis.onvoiceschanged=r;setTimeout(r,600);});
+    await spokenCountIn();
+  }
+
   recTrack=ri;recChunks=[];
-  overdubStartOffset=playOffset; // remember where we started
+  overdubStartOffset=playOffset;
   const types=['audio/webm;codecs=opus','audio/webm','audio/ogg','audio/mp4'];
   const mimeType=types.find(t=>MediaRecorder.isTypeSupported(t))||'';
   recMediaRec=new MediaRecorder(stream,mimeType?{mimeType}:{});
   recMediaRec.ondataavailable=e=>{if(e.data.size>0)recChunks.push(e.data);};
   recMediaRec.onstop=()=>{
     stream.getTracks().forEach(t=>t.stop());
+    if(micAnalyser){try{micAnalyser.disconnect();}catch(e){}micAnalyser=null;}
+    if(micSource){try{micSource.disconnect();}catch(e){}micSource=null;}
     const blob=new Blob(recChunks,{type:mimeType||'audio/webm'});
     blob.arrayBuffer().then(arr=>{
       ctx.decodeAudioData(arr.slice(0)).then(ab=>{
-        // Latency compensation: recActxStartTime is when we called MediaRecorder.start().
-        // The actual audio captured starts slightly later due to MediaRecorder buffering.
-        // We measure the true playhead position at that moment and use it as splice point.
-        const compensatedOffset=recActxStartTime-playStartTime;
-        const spliceAt=Math.max(0,compensatedOffset);
+        const spliceAt=Math.max(0,recActxStartTime-playStartTime);
         const newBuf=overdubMix(ctx,tracks[recTrack].buffer,ab,spliceAt);
         tracks[recTrack].buffer=newBuf;
         tracks[recTrack].waveform=mkWaveform(newBuf);
         maxDur=Math.max(0,...tracks.map(t=>t.buffer?t.buffer.duration:0));
         drawWave(recTrack,0);
-        // Re-encode for storage
         encodeAndStore(ctx,newBuf,recTrack);
       }).catch(()=>setStatus('Could not decode audio'));
     });
@@ -660,15 +699,25 @@ async function startRecording(){
     document.getElementById('btn-rec').classList.remove('armed');
     setStatus('Ready');
   };
-  recMediaRec.start(100);isRecording=true;
-  // Stamp the exact audio clock time when recording begins so we can compensate for
-  // MediaRecorder startup latency when splicing the overdub back in
-  recActxStartTime=actx.currentTime;
-  setStatus(`<span class="rec-dot"></span> Recording Track ${ri+1} — overdubbing from ${fmtTime(overdubStartOffset)}`);
+  // Start recorder and stamp audio clock in the same microtask
+  recMediaRec.start(50);
+  recActxStartTime=ctx.currentTime;
+  isRecording=true;
+  // Wire up mic analyser for input meter
+  try{
+    micSource=ctx.createMediaStreamSource(stream);
+    micAnalyser=ctx.createAnalyser();micAnalyser.fftSize=128;
+    micSource.connect(micAnalyser);
+    micAnalyserData=new Uint8Array(micAnalyser.frequencyBinCount);
+  }catch(e){}
+  // Restart backing tracks from playOffset at the same moment
+  startPlayback(true);
+  // If no backing tracks exist, still run tick for the meter and waveform
+  if(!isPlaying){playStartTime=actx.currentTime-playOffset;isPlaying=true;tick();}
+  setStatus('<span class="rec-dot"></span> Recording Track '+(ri+1));
 }
 
-// Splice newAudio into existingBuffer starting at offsetSecs, replacing that region
-function overdubMix(ctx,existingBuf,newAudio,offsetSecs,trackState){
+function overdubMix(ctx,existingBuf,newAudio,offsetSecs){
   const sr=ctx.sampleRate;
   const existLen=existingBuf?existingBuf.length:0;
   const newLen=newAudio.length;
@@ -676,23 +725,18 @@ function overdubMix(ctx,existingBuf,newAudio,offsetSecs,trackState){
   const totalLen=Math.max(existLen,offsetFrames+newLen);
   const out=ctx.createBuffer(1,totalLen,sr);
   const outData=out.getChannelData(0);
-  // Copy existing audio before punch-in point
   if(existingBuf){
     const existData=existingBuf.getChannelData(0);
     for(let i=0;i<Math.min(offsetFrames,existLen);i++) outData[i]=existData[i];
-    // Copy existing audio after punch-out point (after new recording ends)
     const punchOut=offsetFrames+newLen;
     for(let i=punchOut;i<existLen;i++) outData[i]=existData[i];
   }
-  // Write new recording at offset
   const newData=newAudio.getChannelData(0);
   for(let i=0;i<newLen;i++) outData[offsetFrames+i]=newData[i];
   return out;
 }
 
-// Re-encode an AudioBuffer to webm/wav for localStorage
 function encodeAndStore(ctx,audioBuf,trackIdx){
-  // Use OfflineAudioContext to render then store as PCM wav
   const sr=audioBuf.sampleRate,len=audioBuf.length;
   const buf=new ArrayBuffer(44+len*2),v=new DataView(buf);
   const ws=(o,s)=>{for(let i=0;i<s.length;i++)v.setUint8(o+i,s.charCodeAt(i));};
@@ -700,8 +744,7 @@ function encodeAndStore(ctx,audioBuf,trackIdx){
   v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,1,true);
   v.setUint32(24,sr,true);v.setUint32(28,sr*2,true);v.setUint16(32,2,true);v.setUint16(34,16,true);
   ws(36,'data');v.setUint32(40,len*2,true);
-  const ch=audioBuf.getChannelData(0);
-  let off=44;
+  const ch=audioBuf.getChannelData(0);let off=44;
   for(let i=0;i<len;i++){const s=Math.max(-1,Math.min(1,ch[i]));v.setInt16(off,s<0?s*0x8000:s*0x7FFF,true);off+=2;}
   const b64=arrayBufToB64(buf);
   if(curIdx>=0){demos[curIdx].audio[trackIdx]=b64;demos[curIdx].tracks[trackIdx]=true;saveStorage();}
@@ -713,27 +756,13 @@ function arrayBufToB64(buf){
 }
 function fmtTime(s){const m=Math.floor(s/60);return `${m}:${String(Math.floor(s)%60).padStart(2,'0')}`;}
 
-function stopRecording(){if(recMediaRec&&recMediaRec.state!=='inactive')recMediaRec.stop();isRecording=false;}
-
-async function doCountIn(){
-  const ctx=getCtx();
-  const bd=60/cfg.tempo;
-  const beats=4;
-  const startAt=ctx.currentTime+0.1; // small buffer before first beat
-  for(let b=0;b<beats;b++){
-    const o=ctx.createOscillator(),g=ctx.createGain();
-    o.connect(g);g.connect(ctx.destination);
-    o.frequency.value=b===0?1320:880;
-    const t=startAt+b*bd;
-    g.gain.setValueAtTime(0,t);
-    g.gain.linearRampToValueAtTime(b===0?0.55:0.38,t+0.003);
-    g.gain.exponentialRampToValueAtTime(0.001,t+0.07);
-    o.start(t);o.stop(t+0.08);
-  }
-  // Wait until all beats have played
-  const waitMs=(startAt+beats*bd-ctx.currentTime)*1000;
-  await new Promise(res=>setTimeout(res,Math.max(0,waitMs)));
+function stopRecording(){
+  if(recMediaRec&&recMediaRec.state!=='inactive')recMediaRec.stop();
+  isRecording=false;
+  if(micAnalyser){try{micAnalyser.disconnect();}catch(e){}micAnalyser=null;}
+  if(micSource){try{micSource.disconnect();}catch(e){}micSource=null;}
 }
+
 
 function startPlayback(withRec=false){
   const ctx=getCtx();if(ctx.state==='suspended')ctx.resume();
@@ -794,15 +823,49 @@ function tick(){
     document.getElementById('t-time').textContent=`${m}:${String(s).padStart(2,'0')}`;
     const prog=maxDur>0?elapsed/maxDur:0;
     tracks.forEach((_,i)=>{if(tracks[i].buffer)drawWave(i,Math.min(prog,1));});
-    if(analyser){
-      analyser.getByteFrequencyData(analyserData);
+
+    // Level meter: use mic analyser during recording, playback analyser otherwise
+    const meterSrc=(isRecording&&micAnalyser)?micAnalyser:analyser;
+    const meterData=(isRecording&&micAnalyserData)?micAnalyserData:analyserData;
+    if(meterSrc&&meterData){
+      meterSrc.getByteFrequencyData(meterData);
+      // RMS across all bins for a single level reading
+      let sum=0;for(let i=0;i<meterData.length;i++)sum+=meterData[i]*meterData[i];
+      const rms=Math.sqrt(sum/meterData.length);
       document.querySelectorAll('.level-bar').forEach((b,i)=>{
-        const v=analyserData[i*3]||0;
-        b.style.height=Math.max(3,(v/255)*30)+'px';
-        b.style.background=v>190?'var(--red)':v>130?'var(--yellow)':'rgba(48,209,88,0.7)';
+        const thresh=[0.15,0.35,0.55,0.75,0.9];
+        const lit=rms/255>thresh[i];
+        const pct=lit?Math.min(1,(rms/255-thresh[i])*8):0;
+        const h=lit?Math.max(4,pct*30):3+Math.random()*2;
+        b.style.height=h+'px';
+        b.style.background=rms>210?'var(--red)':rms>150?'var(--orange)':'rgba(48,209,88,0.8)';
       });
     }
-    if(elapsed>=maxDur&&maxDur>0){stopPlayback(false);playOffset=0;setStatus('Ready');return;}
+
+    // Animate recording waveform — draw live input level on the rec track canvas
+    if(isRecording&&micAnalyser&&micAnalyserData){
+      micAnalyser.getByteTimeDomainData(micAnalyserData);
+      const canvas=document.getElementById(`wc-${recTrack}`);
+      const area=document.getElementById(`warea-${recTrack}`);
+      if(canvas&&area){
+        const W=area.clientWidth||260,H=74;
+        if(canvas.width!==W){canvas.width=W;canvas.height=H;}
+        const c=canvas.getContext('2d');
+        // Draw existing waveform dimly first
+        if(tracks[recTrack].waveform) drawWave(recTrack, Math.min(prog,1));
+        // Overlay live input waveform
+        c.strokeStyle='rgba(255,69,58,0.75)';c.lineWidth=1.5;
+        c.beginPath();
+        const sl=W/micAnalyserData.length;
+        micAnalyserData.forEach((v,i)=>{
+          const x=i*sl,y=(v/128)*H/2;
+          i===0?c.moveTo(x,H/2+y-H/2):c.lineTo(x,H/2+y-H/2);
+        });
+        c.stroke();
+      }
+    }
+
+    if(!isRecording&&elapsed>=maxDur&&maxDur>0){stopPlayback(false);playOffset=0;setStatus('Ready');return;}
     tick();
   });
 }
