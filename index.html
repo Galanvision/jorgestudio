@@ -430,7 +430,6 @@ html, body {
     <div class="modal-title">Tempo &amp; Metronome</div>
     <input class="tempo-big" id="tempo-input" type="number" min="40" max="300" value="120" />
     <div class="modal-row"><div><div class="modal-row-label">Metronome</div><div class="modal-row-sub">Click track while recording &amp; playing</div></div><div class="toggle" id="tog-metro"></div></div>
-    <div class="modal-row"><div><div class="modal-row-label">Count-in</div><div class="modal-row-sub">4 beats before recording starts</div></div><div class="toggle" id="tog-countin"></div></div>
     <button class="modal-btn" id="close-tempo">Done</button>
   </div>
 </div>
@@ -624,37 +623,60 @@ let recActxStartTime=0;
 let micSource=null,micAnalyser=null,micAnalyserData=null;
 
 async function spokenCountIn(){
-  return new Promise(res=>{
-    if(!window.speechSynthesis){res();return;}
-    const bd=60/cfg.tempo;
-    const ctx=getCtx();
-    // Load voices — Chrome lazy-loads them
-    let voices=speechSynthesis.getVoices();
-    function pickVoice(){
-      voices=speechSynthesis.getVoices();
-      return voices.find(v=>/female|woman|samantha|victoria|karen|moira|tessa|fiona|google us|google uk/i.test(v.name))||voices[0];
-    }
-    function speakAt(text,delayMs,onDone){
-      setTimeout(()=>{
-        speechSynthesis.cancel();
-        const u=new SpeechSynthesisUtterance(text);
-        u.rate=Math.max(0.85,Math.min(2.2,(cfg.tempo/76)*1.05));
-        u.pitch=1.15;u.volume=1;
-        const v=pickVoice();if(v)u.voice=v;
-        if(onDone)u.onend=onDone;
-        speechSynthesis.speak(u);
-      },delayMs);
-    }
-    const msPerBeat=(60/cfg.tempo)*1000;
-    // "One" on beat 1, "Two" on beat 2, "One two three four" on beat 3 (as a phrase)
-    speakAt('One',50);
-    speakAt('Two',msPerBeat+50);
-    speakAt('One, two, three, four',msPerBeat*2+50,()=>{
-      setTimeout(res,200);
+  // Pre-load voices synchronously — must be called after user gesture
+  let voices=speechSynthesis.getVoices();
+  if(voices.length===0){
+    await new Promise(r=>{
+      speechSynthesis.onvoiceschanged=()=>{voices=speechSynthesis.getVoices();r();};
+      setTimeout(r,800);
     });
-    // Safety fallback
-    setTimeout(res,msPerBeat*6+600);
-  });
+    voices=speechSynthesis.getVoices();
+  }
+
+  function pickVoice(){
+    // Prefer a female English voice; fall back to any English; fall back to first
+    return voices.find(v=>/samantha|victoria|karen|moira|tessa|fiona/i.test(v.name))
+      || voices.find(v=>/female/i.test(v.name)&&/en/i.test(v.lang))
+      || voices.find(v=>/en/i.test(v.lang))
+      || voices[0];
+  }
+
+  const msPerBeat=(60/cfg.tempo)*1000;
+  // Rate: at 120bpm words must fit in ~500ms each. SpeechSynthesis rate 1 = ~120wpm.
+  // For single words "One"/"Two" rate=1 is fine; for the phrase scale with tempo.
+  const wordRate=Math.max(0.9,Math.min(2.0,cfg.tempo/90));
+  const phraseRate=Math.max(1.1,Math.min(2.5,(cfg.tempo/80)*1.2));
+  const voice=pickVoice();
+
+  function speak(text,rate){
+    return new Promise(res=>{
+      speechSynthesis.cancel(); // clear queue before each word
+      const u=new SpeechSynthesisUtterance(text);
+      u.rate=rate; u.pitch=1.2; u.volume=1;
+      if(voice)u.voice=voice;
+      u.onend=()=>res();
+      u.onerror=()=>res();
+      speechSynthesis.speak(u);
+      // Fallback: resolve after 1.5 beats max so we never hang
+      setTimeout(res, msPerBeat*1.5);
+    });
+  }
+
+  // Speak each word/phrase then wait to fill the beat gap before the next
+  const t0=performance.now();
+  await speak('One', wordRate);
+  const elapsed1=performance.now()-t0;
+  await new Promise(r=>setTimeout(r, Math.max(0, msPerBeat-elapsed1)));
+
+  const t1=performance.now()-t0;
+  await speak('Two', wordRate);
+  const elapsed2=performance.now()-t0;
+  await new Promise(r=>setTimeout(r, Math.max(0, msPerBeat*2-elapsed2)));
+
+  // "One two three four" fills beats 3-4 and acts as the "go" cue
+  await speak('One, two, three, four', phraseRate);
+  // Small buffer so the phrase finishes cleanly before record starts
+  await new Promise(r=>setTimeout(r,120));
 }
 
 async function startRecording(){
@@ -668,8 +690,6 @@ async function startRecording(){
   if(cfg.countin){
     setStatus('Count-in…');
     stopSources();stopMetro();
-    if(speechSynthesis.getVoices().length===0)
-      await new Promise(r=>{speechSynthesis.onvoiceschanged=r;setTimeout(r,600);});
     await spokenCountIn();
   }
 
@@ -957,7 +977,6 @@ function closeModal(id){document.getElementById(id).classList.remove('open');}
 });
 
 document.getElementById('tog-metro').onclick=()=>{cfg.metro=!cfg.metro;document.getElementById('tog-metro').classList.toggle('on',cfg.metro);};
-document.getElementById('tog-countin').onclick=()=>{cfg.countin=!cfg.countin;document.getElementById('tog-countin').classList.toggle('on',cfg.countin);document.getElementById('pill-countin').classList.toggle('active',cfg.countin);};
 document.getElementById('close-tempo').onclick=()=>{cfg.tempo=Math.min(300,Math.max(40,parseInt(document.getElementById('tempo-input').value)||120));document.getElementById('bpm-label').textContent=cfg.tempo+' BPM';closeModal('modal-tempo');};
 document.getElementById('tog-fx').onclick=()=>{cfg.fx=!cfg.fx;document.getElementById('tog-fx').classList.toggle('on',cfg.fx);document.getElementById('pill-fx').classList.toggle('active',cfg.fx);};
 document.getElementById('close-fx').onclick=()=>closeModal('modal-fx');
