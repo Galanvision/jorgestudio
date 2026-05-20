@@ -79,13 +79,12 @@ html, body {
 .demo-item-name { font-size: 15px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .demo-item-meta { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
 .demo-item-del {
-  width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0;
-  background: rgba(255,69,58,0.12); border: 1px solid rgba(255,69,58,0.25);
-  color: rgba(255,69,58,0.6); cursor: pointer;
+  flex-shrink: 0; background: none; border: none;
+  color: var(--text-secondary); cursor: pointer; padding: 6px 2px;
   display: flex; align-items: center; justify-content: center;
-  transition: all 0.15s; -webkit-tap-highlight-color: transparent;
+  transition: color 0.15s; -webkit-tap-highlight-color: transparent;
 }
-.demo-item-del:hover { background: rgba(255,69,58,0.28); border-color: rgba(255,69,58,0.6); color: var(--red); }
+.demo-item-del:hover { color: var(--red); }
 .demo-item-del:active { transform: scale(0.88); }
 .btn-new {
   background: rgba(255,255,255,0.07);
@@ -171,7 +170,14 @@ html, body {
 
 .waveform-area {
   flex: 1; height: 74px; margin: 0 8px;
-  position: relative; cursor: pointer; overflow: hidden;
+  position: relative; cursor: col-resize; overflow: hidden;
+  user-select: none; -webkit-user-select: none;
+}
+.waveform-area.dragging { cursor: col-resize; }
+.scrub-line {
+  position: absolute; top: 0; bottom: 0; width: 1px;
+  background: rgba(255,255,255,0.25); pointer-events: none;
+  display: none;
 }
 .waveform-canvas { width: 100%; height: 100%; display: block; }
 .playhead {
@@ -494,7 +500,7 @@ function renderLanding(){
   demos.forEach((d,i)=>{
     const count=d.tracks.filter(Boolean).length;
     const el=document.createElement('div');el.className='demo-item';
-    el.innerHTML=`<div class="demo-item-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="rgba(185,155,255,0.85)" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div><div class="demo-item-info"><div class="demo-item-name">${escHtml(d.name)}</div><div class="demo-item-meta">${count} track${count!==1?'s':''} · ${d.date}</div></div><div class="demo-item-arrow" style="margin-right:8px">›</div><button class="demo-item-del" title="Delete demo"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg></button>`;
+    el.innerHTML=`<div class="demo-item-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="rgba(185,155,255,0.85)" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div><div class="demo-item-info"><div class="demo-item-name">${escHtml(d.name)}</div><div class="demo-item-meta">${count} track${count!==1?'s':''} · ${d.date}</div></div><div class="demo-item-arrow" style="margin-right:8px">›</div><button class="demo-item-del" title="Delete demo"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg></button>`;
     el.querySelector('.demo-item-del').onclick=e=>{
       e.stopPropagation();
       if(!confirm(`Delete "${d.name}"?`))return;
@@ -541,11 +547,38 @@ function buildTracks(){
   tracks.forEach((t,i)=>{
     const div=document.createElement('div');
     div.className=`track ${T_CLASS[t.state]}`;div.id=`track-${i}`;
-    div.innerHTML=`<button class="state-btn ${S_CLASS[t.state]}" id="sbtn-${i}">${S_LABEL[t.state]}</button><div class="waveform-area" id="warea-${i}"><canvas class="waveform-canvas" id="wc-${i}"></canvas><div class="playhead" id="ph-${i}"></div><div class="empty-label" id="el-${i}">${t.buffer?'':'No audio — set R to record'}</div></div><div class="track-num-badge">${i+1}</div>`;
+    div.innerHTML=`<button class="state-btn ${S_CLASS[t.state]}" id="sbtn-${i}">${S_LABEL[t.state]}</button><div class="waveform-area" id="warea-${i}"><canvas class="waveform-canvas" id="wc-${i}"></canvas><div class="playhead" id="ph-${i}"></div><div class="scrub-line" id="sl-${i}"></div><div class="empty-label" id="el-${i}">${t.buffer?'':'No audio — set R to record'}</div></div><div class="track-num-badge">${i+1}</div>`;
     c.appendChild(div);
     div.querySelector(`#sbtn-${i}`).onclick=e=>{e.stopPropagation();cycleState(i);};
     if(t.buffer)setTimeout(()=>drawWave(i,0),40);
+    addScrubListeners(div.querySelector(`#warea-${i}`));
   });
+}
+
+function addScrubListeners(area){
+  let dragging=false;
+  function getPos(e){
+    const rect=area.getBoundingClientRect();
+    const clientX=e.touches?e.touches[0].clientX:e.clientX;
+    return Math.max(0,Math.min(1,(clientX-rect.left)/rect.width));
+  }
+  function scrubTo(pct){
+    const dur=Math.max(maxDur,...tracks.map(t=>t.buffer?t.buffer.duration:0),1);
+    playOffset=pct*dur;
+    document.getElementById('t-time').textContent=fmtTime(playOffset);
+    for(let j=0;j<4;j++){
+      const ph=document.getElementById(`ph-${j}`),ar=document.getElementById(`warea-${j}`);
+      if(ph&&ar){ph.style.display='block';ph.style.left=(pct*ar.clientWidth)+'px';}
+      if(tracks[j].buffer)drawWave(j,pct);
+    }
+    if(isPlaying){stopSources();startPlayback(false);}
+  }
+  area.addEventListener('mousedown',e=>{if(isRecording||e.button!==0)return;dragging=true;scrubTo(getPos(e));e.preventDefault();});
+  area.addEventListener('touchstart',e=>{if(isRecording)return;dragging=true;scrubTo(getPos(e));e.preventDefault();},{passive:false});
+  window.addEventListener('mousemove',e=>{if(dragging)scrubTo(getPos(e));});
+  window.addEventListener('touchmove',e=>{if(dragging)scrubTo(getPos(e));},{passive:false});
+  window.addEventListener('mouseup',()=>{dragging=false;});
+  window.addEventListener('touchend',()=>{dragging=false;});
 }
 
 function cycleState(i){const cur=CYCLE.indexOf(tracks[i].state);tracks[i].state=CYCLE[(cur+1)%CYCLE.length];refreshTrack(i);}
@@ -585,15 +618,20 @@ function drawWave(i,progress){
   if(ph){ph.style.display=progress>0?'block':'none';if(progress>0)ph.style.left=(progress*W)+'px';}
 }
 
+let recArmed=false;
+let overdubStartOffset=0; // where in the timeline recording began, for trimming
+
 async function startRecording(){
   const ctx=getCtx();if(ctx.state==='suspended')await ctx.resume();
   const ri=tracks.findIndex(t=>t.state==='record');
-  if(ri<0){setStatus('Set a track to R first');return;}
+  if(ri<0){setStatus('Set a track to R first');document.getElementById('btn-rec').classList.remove('armed');recArmed=false;return;}
   let stream;
-  try{stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});}
-  catch(e){setStatus('Microphone access denied');return;}
+  // Use echo cancellation so playback doesn't bleed into mic without headphones
+  try{stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:false,autoGainControl:false}});}
+  catch(e){setStatus('Microphone access denied');document.getElementById('btn-rec').classList.remove('armed');recArmed=false;return;}
   if(cfg.countin)await doCountIn();
   recTrack=ri;recChunks=[];
+  overdubStartOffset=playOffset; // remember where we started
   const types=['audio/webm;codecs=opus','audio/webm','audio/ogg','audio/mp4'];
   const mimeType=types.find(t=>MediaRecorder.isTypeSupported(t))||'';
   recMediaRec=new MediaRecorder(stream,mimeType?{mimeType}:{});
@@ -603,18 +641,69 @@ async function startRecording(){
     const blob=new Blob(recChunks,{type:mimeType||'audio/webm'});
     blob.arrayBuffer().then(arr=>{
       ctx.decodeAudioData(arr.slice(0)).then(ab=>{
-        tracks[recTrack].buffer=ab;tracks[recTrack].waveform=mkWaveform(ab);
-        if(ab.duration>maxDur)maxDur=ab.duration;drawWave(recTrack,0);
-        arrToB64(arr).then(b64=>{if(curIdx>=0){demos[curIdx].audio[recTrack]=b64;demos[curIdx].tracks[recTrack]=true;saveStorage();}});
+        // Overdub: splice new recording into existing buffer at overdubStartOffset
+        const newBuf=overdubMix(ctx,tracks[recTrack].buffer,ab,overdubStartOffset,tracks[recTrack].state);
+        tracks[recTrack].buffer=newBuf;
+        tracks[recTrack].waveform=mkWaveform(newBuf);
+        maxDur=Math.max(0,...tracks.map(t=>t.buffer?t.buffer.duration:0));
+        drawWave(recTrack,0);
+        // Re-encode for storage
+        encodeAndStore(ctx,newBuf,recTrack);
       }).catch(()=>setStatus('Could not decode audio'));
     });
-    isRecording=false;document.getElementById('btn-rec').classList.remove('armed');setStatus('Ready');
+    isRecording=false;recArmed=false;
+    document.getElementById('btn-rec').classList.remove('armed');
+    setStatus('Ready');
   };
   recMediaRec.start(100);isRecording=true;
-  document.getElementById('btn-rec').classList.add('armed');
-  setStatus(`<span class="rec-dot"></span> Recording Track ${ri+1}`);
-  startPlayback(true);
+  setStatus(`<span class="rec-dot"></span> Recording Track ${ri+1} — overdubbing from ${fmtTime(overdubStartOffset)}`);
 }
+
+// Splice newAudio into existingBuffer starting at offsetSecs, replacing that region
+function overdubMix(ctx,existingBuf,newAudio,offsetSecs,trackState){
+  const sr=ctx.sampleRate;
+  const existLen=existingBuf?existingBuf.length:0;
+  const newLen=newAudio.length;
+  const offsetFrames=Math.round(offsetSecs*sr);
+  const totalLen=Math.max(existLen,offsetFrames+newLen);
+  const out=ctx.createBuffer(1,totalLen,sr);
+  const outData=out.getChannelData(0);
+  // Copy existing audio before punch-in point
+  if(existingBuf){
+    const existData=existingBuf.getChannelData(0);
+    for(let i=0;i<Math.min(offsetFrames,existLen);i++) outData[i]=existData[i];
+    // Copy existing audio after punch-out point (after new recording ends)
+    const punchOut=offsetFrames+newLen;
+    for(let i=punchOut;i<existLen;i++) outData[i]=existData[i];
+  }
+  // Write new recording at offset
+  const newData=newAudio.getChannelData(0);
+  for(let i=0;i<newLen;i++) outData[offsetFrames+i]=newData[i];
+  return out;
+}
+
+// Re-encode an AudioBuffer to webm/wav for localStorage
+function encodeAndStore(ctx,audioBuf,trackIdx){
+  // Use OfflineAudioContext to render then store as PCM wav
+  const sr=audioBuf.sampleRate,len=audioBuf.length;
+  const buf=new ArrayBuffer(44+len*2),v=new DataView(buf);
+  const ws=(o,s)=>{for(let i=0;i<s.length;i++)v.setUint8(o+i,s.charCodeAt(i));};
+  ws(0,'RIFF');v.setUint32(4,36+len*2,true);ws(8,'WAVE');ws(12,'fmt ');
+  v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,1,true);
+  v.setUint32(24,sr,true);v.setUint32(28,sr*2,true);v.setUint16(32,2,true);v.setUint16(34,16,true);
+  ws(36,'data');v.setUint32(40,len*2,true);
+  const ch=audioBuf.getChannelData(0);
+  let off=44;
+  for(let i=0;i<len;i++){const s=Math.max(-1,Math.min(1,ch[i]));v.setInt16(off,s<0?s*0x8000:s*0x7FFF,true);off+=2;}
+  const b64=arrayBufToB64(buf);
+  if(curIdx>=0){demos[curIdx].audio[trackIdx]=b64;demos[curIdx].tracks[trackIdx]=true;saveStorage();}
+}
+function arrayBufToB64(buf){
+  let bin='';const bytes=new Uint8Array(buf);
+  for(let i=0;i<bytes.byteLength;i++)bin+=String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+function fmtTime(s){const m=Math.floor(s/60);return `${m}:${String(Math.floor(s)%60).padStart(2,'0')}`;}
 
 function stopRecording(){if(recMediaRec&&recMediaRec.state!=='inactive')recMediaRec.stop();isRecording=false;}
 
@@ -665,7 +754,7 @@ function stopPlayback(reset=true){
   if(!isRecording)setStatus('Ready');
 }
 
-function stopAll(reset=true){stopRecording();stopPlayback(reset);document.getElementById('btn-rec').classList.remove('armed');}
+function stopAll(reset=true){stopRecording();stopPlayback(reset);recArmed=false;document.getElementById('btn-rec').classList.remove('armed');}
 
 function tick(){
   animId=requestAnimationFrame(()=>{
@@ -714,12 +803,22 @@ function makeFX(ctx){
 
 document.getElementById('btn-rec').onclick=async()=>{
   const btn=document.getElementById('btn-rec');
-  if(isRecording){stopAll();btn.classList.remove('armed');return;}
-  if(btn.classList.contains('armed')){btn.classList.remove('armed');return;}
-  btn.classList.add('armed');
-  await startRecording();
+  if(isRecording){stopAll(false);return;}
+  recArmed=!recArmed;
+  btn.classList.toggle('armed',recArmed);
+  setStatus(recArmed?'Armed — press ▶ to record':'Ready');
 };
-document.getElementById('btn-play').onclick=()=>{if(isRecording)return;if(isPlaying)stopPlayback(false);else startPlayback();};
+document.getElementById('btn-play').onclick=async()=>{
+  if(isPlaying||isRecording){stopAll(false);return;}
+  if(recArmed){
+    const ri=tracks.findIndex(t=>t.state==='record');
+    if(ri<0){setStatus('Set a track to R first');return;}
+    startPlayback(true); // start other tracks playing first
+    await startRecording(); // then open mic (echo cancellation already active)
+  } else {
+    startPlayback(false);
+  }
+};
 document.getElementById('btn-rw').onclick=()=>stopAll(true);
 document.getElementById('btn-ff').onclick=()=>{stopAll(false);playOffset=maxDur||0;};
 
