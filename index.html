@@ -646,30 +646,28 @@ function drawWave(i,progress){
   if(ph){ph.style.display=progress>0?'block':'none';if(progress>0)ph.style.left=(progress*W)+'px';}
 }
 
-async function spokenCountIn(){
-  if(!window.speechSynthesis) return;
-  // Load voices - browsers are lazy
-  if(!speechSynthesis.getVoices().length)
-    await new Promise(r=>{speechSynthesis.onvoiceschanged=r;setTimeout(r,1200);});
-  const voices=speechSynthesis.getVoices();
-  const voice=
-    voices.find(v=>/samantha|victoria|karen|moira|tessa|fiona/i.test(v.name))||
-    voices.find(v=>/en.US/i.test(v.lang))||
-    voices.find(v=>/en/i.test(v.lang))||
-    voices[0]||null;
-  const msPerBeat=(60/cfg.tempo)*1000;
-  function u(text,rate){
-    const ut=new SpeechSynthesisUtterance(text);
-    ut.rate=rate;ut.pitch=1.1;ut.volume=1;
-    if(voice)ut.voice=voice;
-    return ut;
+async function doCountIn(){
+  // Pure Web Audio tone count-in — reliable on all browsers/devices
+  const ctx = getCtx();
+  const bd  = 60 / cfg.tempo;          // seconds per beat
+  const now = ctx.currentTime + 0.05;  // tiny scheduling buffer
+  for(let b = 0; b < 4; b++){
+    const osc = ctx.createOscillator();
+    const env = ctx.createGain();
+    osc.connect(env); env.connect(ctx.destination);
+    // Beat 1 is high (1200 Hz), beats 2-4 are low (800 Hz)
+    osc.frequency.value = (b === 0) ? 1200 : 800;
+    osc.type = 'sine';
+    const t = now + b * bd;
+    env.gain.setValueAtTime(0, t);
+    env.gain.linearRampToValueAtTime(0.6, t + 0.004);
+    env.gain.exponentialRampToValueAtTime(0.001, t + 0.08);
+    osc.start(t);
+    osc.stop(t + 0.09);
   }
-  speechSynthesis.cancel();
-  await new Promise(r=>setTimeout(r,100));
-  speechSynthesis.speak(u('One',1));
-  speechSynthesis.speak(u('Two',1));
-  speechSynthesis.speak(u('One, two, three, four',Math.max(1,Math.min(2,cfg.tempo/80))));
-  await new Promise(r=>setTimeout(r,msPerBeat*4+600));
+  // Wait exactly 4 beats
+  const waitMs = (now + 4 * bd - ctx.currentTime) * 1000;
+  await new Promise(r => setTimeout(r, waitMs + 20));
 }
 
 // ── SYNC ARCHITECTURE ──────────────────────────────────────
@@ -708,7 +706,7 @@ async function startRecording(){
   if(cfg.countin){
     setStatus('Count-in\u2026');
     stopSources(); stopMetro();
-    await spokenCountIn();
+    await doCountIn();
   }
 
   recTrack=ri;
@@ -734,17 +732,16 @@ async function startRecording(){
     recBuffer.push(new Float32Array(e.inputBuffer.getChannelData(0)));
   };
 
-  // Stamp the audio clock NOW - same clock as playback sources we're about to start
-  recActxStartTime=ctx.currentTime;
-  isRecording=true;
-  document.getElementById('btn-rec').classList.add('armed');
-
-  // Start backing tracks - playStartTime is set inside startPlayback
+  // Start backing tracks FIRST so playStartTime is set before we stamp rec time
   startPlayback(true);
   if(!isPlaying){playStartTime=ctx.currentTime;isPlaying=true;tick();}
 
-  // Keep stream ref so we can close it later
-  recScriptNode._stream=stream;
+  // Stamp AFTER playback starts — both times are on the same Web Audio clock
+  recActxStartTime = ctx.currentTime;
+  isRecording = true;
+  document.getElementById('btn-rec').classList.add('armed');
+
+  recScriptNode._stream = stream;
   setStatus('<span class="rec-dot"></span> Recording Track '+(ri+1));
 }
 
@@ -774,8 +771,11 @@ function stopRecording(){
   let pos=0;
   for(const chunk of recBuffer){dst.set(chunk,pos);pos+=chunk.length;}
 
-  // Splice point: how far into the timeline were we when recording started?
-  const spliceAt=Math.max(0,recActxStartTime-playStartTime);
+  // Splice point: elapsed time from playback start to when recorder was stamped,
+  // minus one ScriptProcessor buffer period (the inherent capture delay).
+  const bufDelaySec = 4096 / (ctx.sampleRate || 48000);
+  const rawSplice = recActxStartTime - playStartTime;
+  const spliceAt = Math.max(0, rawSplice - bufDelaySec);
   const newBuf=overdubMix(ctx,tracks[recTrack].buffer,newAudio,spliceAt);
   tracks[recTrack].buffer=newBuf;
   tracks[recTrack].waveform=mkWaveform(newBuf);
@@ -1036,41 +1036,88 @@ document.getElementById('opt-clear').onclick=()=>{
 };
 
 async function doExport(mode){
-  const bufs=tracks.filter(t=>t.buffer);if(!bufs.length){alert('Nothing recorded yet.');return;}
-  const ctx=getCtx(),dur=Math.max(...tracks.map(t=>t.buffer?t.buffer.duration:0));
-  const sr=ctx.sampleRate,len=Math.ceil(dur*sr);
-  if(mode==='stems'){
-    for(let i=0;i<4;i++){
-      if(!tracks[i].buffer)continue;
-      const oc=new OfflineAudioContext(2,len,sr),s=oc.createBufferSource();s.buffer=tracks[i].buffer;
-      if(cfg.fx){const w=makeFXOff(oc);s.connect(w);w.connect(oc.destination);}else s.connect(oc.destination);
-      s.start(0);const rb=await oc.startRendering();dlWav(rb,`track-${i+1}.wav`);
+  const bufs=tracks.filter(t=>t.buffer);
+  if(!bufs.length){alert('Nothing recorded yet.');return;}
+  setStatus('Exporting…');
+  const ctx=getCtx();
+  const dur=Math.max(...tracks.map(t=>t.buffer?t.buffer.duration:0));
+  const sr=ctx.sampleRate;
+  const len=Math.ceil(dur*sr);
+  if(len<=0){alert('No audio to export.');setStatus('Ready');return;}
+  try{
+    if(mode==='stems'){
+      for(let i=0;i<4;i++){
+        if(!tracks[i].buffer) continue;
+        // Mono stem — use 1 channel OfflineAudioContext
+        const oc=new OfflineAudioContext(1,len,sr);
+        const s=oc.createBufferSource();
+        // Always use mono channel 0 since our recordings are mono
+        const mono=oc.createBuffer(1,tracks[i].buffer.length,sr);
+        mono.getChannelData(0).set(tracks[i].buffer.getChannelData(0));
+        s.buffer=mono;
+        s.connect(oc.destination);
+        s.start(0);
+        const rb=await oc.startRendering();
+        dlWav(rb,'track-'+(i+1)+'.wav');
+        await new Promise(r=>setTimeout(r,300)); // stagger downloads
+      }
+    }else{
+      // Stereo mix — render all tracks into a 2-channel offline context
+      const oc=new OfflineAudioContext(2,len,sr);
+      tracks.forEach(t=>{
+        if(!t.buffer) return;
+        const s=oc.createBufferSource();
+        // Upmix mono to stereo
+        const stereo=oc.createBuffer(2,t.buffer.length,sr);
+        stereo.getChannelData(0).set(t.buffer.getChannelData(0));
+        stereo.getChannelData(1).set(t.buffer.getChannelData(0));
+        s.buffer=stereo;
+        if(cfg.fx){const w=makeFXOff(oc);s.connect(w);}
+        else s.connect(oc.destination);
+        s.start(0);
+      });
+      const rb=await oc.startRendering();
+      const dname=(curIdx>=0?demos[curIdx].name:'demo').replace(/[^a-z0-9]/gi,'-').toLowerCase();
+      dlWav(rb,dname+'-mix.wav');
     }
-  }else{
-    const oc=new OfflineAudioContext(2,len,sr);
-    tracks.forEach(t=>{if(!t.buffer)return;const s=oc.createBufferSource();s.buffer=t.buffer;if(cfg.fx){const w=makeFXOff(oc);s.connect(w);w.connect(oc.destination);}else s.connect(oc.destination);s.start(0);});
-    const rb=await oc.startRendering();
-    const name=(curIdx>=0?demos[curIdx].name:'demo').replace(/[^a-z0-9]/gi,'-').toLowerCase();
-    dlWav(rb,`${name}-mix.wav`);
+    setStatus('Export done');
+  }catch(err){
+    console.error('Export error',err);
+    setStatus('Export failed: '+err.message);
   }
 }
 function makeFXOff(oc){const ws=oc.createWaveShaper();const c=new Float32Array(512);for(let i=0;i<512;i++){const x=(i*2/512)-1;c[i]=(Math.PI+18)*x/(Math.PI+18*Math.abs(x));}ws.curve=c;ws.oversample='4x';ws.connect(oc.destination);return ws;}
 function dlWav(ab,name){
-  const nc=ab.numberOfChannels,l=ab.length,sr=ab.sampleRate;
-  const buf=new ArrayBuffer(44+l*nc*2),v=new DataView(buf);
-  const ws=(o,s)=>{for(let i=0;i<s.length;i++)v.setUint8(o+i,s.charCodeAt(i));};
-  ws(0,'RIFF');v.setUint32(4,36+l*nc*2,true);ws(8,'WAVE');ws(12,'fmt ');v.setUint32(16,16,true);
-  v.setUint16(20,1,true);v.setUint16(22,nc,true);v.setUint32(24,sr,true);
-  v.setUint32(28,sr*nc*2,true);v.setUint16(32,nc*2,true);v.setUint16(34,16,true);
-  ws(36,'data');v.setUint32(40,l*nc*2,true);
+  const nc=ab.numberOfChannels, l=ab.length, sr=ab.sampleRate;
+  // Build WAV in a Uint8Array for reliability
+  const dataLen = l * nc * 2;
+  const buf = new ArrayBuffer(44 + dataLen);
+  const v = new DataView(buf);
+  function str(off,s){for(let i=0;i<s.length;i++) v.setUint8(off+i,s.charCodeAt(i));}
+  str(0,'RIFF'); v.setUint32(4,36+dataLen,true); str(8,'WAVE');
+  str(12,'fmt '); v.setUint32(16,16,true); v.setUint16(20,1,true);
+  v.setUint16(22,nc,true); v.setUint32(24,sr,true);
+  v.setUint32(28,sr*nc*2,true); v.setUint16(32,nc*2,true); v.setUint16(34,16,true);
+  str(36,'data'); v.setUint32(40,dataLen,true);
   let off=44;
-  for(let s=0;s<l;s++)for(let c=0;c<nc;c++){
-    const smp=Math.max(-1,Math.min(1,ab.getChannelData(c)[s]));
-    v.setInt16(off,smp<0?smp*0x8000:smp*0x7FFF,true);off+=2;
+  for(let i=0;i<l;i++) for(let c=0;c<nc;c++){
+    const s=Math.max(-1,Math.min(1,ab.getChannelData(c)[i]));
+    v.setInt16(off, s<0 ? s*0x8000 : s*0x7FFF, true); off+=2;
   }
-  const url=URL.createObjectURL(new Blob([buf],{type:'audio/wav'}));
-  const a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();document.body.removeChild(a);
-  setTimeout(()=>URL.revokeObjectURL(url),4000);
+  // Use a synchronous Object URL download — most reliable cross-browser method
+  const blob = new Blob([buf],{type:'audio/wav'});
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.style.display = 'none';
+  a.href     = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  // Delay removal so browser has time to start the download
+  setTimeout(()=>{
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, 5000);
 }
 function setStatus(html){document.getElementById('status-bar').innerHTML=html;}
 function arrToB64(arr){return new Promise(res=>{const blob=new Blob([arr]);const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.readAsDataURL(blob);});}
