@@ -581,7 +581,7 @@ function addScrubListeners(area){
   window.addEventListener('touchend',()=>{dragging=false;});
 }
 
-function cycleState(i){const cur=CYCLE.indexOf(tracks[i].state);tracks[i].state=CYCLE[(cur+1)%CYCLE.length];refreshTrack(i);}
+function cycleState(i){const cur=CYCLE.indexOf(tracks[i].state);tracks[i].state=CYCLE[(cur+1)%CYCLE.length];refreshTrack(i);applyLiveGains();}
 function refreshTrack(i){
   const t=tracks[i],div=document.getElementById(`track-${i}`);if(!div)return;
   div.className=`track ${T_CLASS[t.state]}`;
@@ -619,7 +619,8 @@ function drawWave(i,progress){
 }
 
 let recArmed=false;
-let overdubStartOffset=0; // where in the timeline recording began, for trimming
+let overdubStartOffset=0;
+let recActxStartTime=0; // audio clock when MediaRecorder.start() was called
 
 async function startRecording(){
   const ctx=getCtx();if(ctx.state==='suspended')await ctx.resume();
@@ -641,8 +642,12 @@ async function startRecording(){
     const blob=new Blob(recChunks,{type:mimeType||'audio/webm'});
     blob.arrayBuffer().then(arr=>{
       ctx.decodeAudioData(arr.slice(0)).then(ab=>{
-        // Overdub: splice new recording into existing buffer at overdubStartOffset
-        const newBuf=overdubMix(ctx,tracks[recTrack].buffer,ab,overdubStartOffset,tracks[recTrack].state);
+        // Latency compensation: recActxStartTime is when we called MediaRecorder.start().
+        // The actual audio captured starts slightly later due to MediaRecorder buffering.
+        // We measure the true playhead position at that moment and use it as splice point.
+        const compensatedOffset=recActxStartTime-playStartTime;
+        const spliceAt=Math.max(0,compensatedOffset);
+        const newBuf=overdubMix(ctx,tracks[recTrack].buffer,ab,spliceAt);
         tracks[recTrack].buffer=newBuf;
         tracks[recTrack].waveform=mkWaveform(newBuf);
         maxDur=Math.max(0,...tracks.map(t=>t.buffer?t.buffer.duration:0));
@@ -656,6 +661,9 @@ async function startRecording(){
     setStatus('Ready');
   };
   recMediaRec.start(100);isRecording=true;
+  // Stamp the exact audio clock time when recording begins so we can compensate for
+  // MediaRecorder startup latency when splicing the overdub back in
+  recActxStartTime=actx.currentTime;
   setStatus(`<span class="rec-dot"></span> Recording Track ${ri+1} — overdubbing from ${fmtTime(overdubStartOffset)}`);
 }
 
@@ -708,16 +716,23 @@ function fmtTime(s){const m=Math.floor(s/60);return `${m}:${String(Math.floor(s)
 function stopRecording(){if(recMediaRec&&recMediaRec.state!=='inactive')recMediaRec.stop();isRecording=false;}
 
 async function doCountIn(){
-  const ctx=getCtx(),bd=60/cfg.tempo;
-  return new Promise(res=>{
-    for(let b=0;b<4;b++){
-      const o=ctx.createOscillator(),g=ctx.createGain();o.connect(g);g.connect(ctx.destination);
-      o.frequency.value=b===0?1200:900;const t=ctx.currentTime+b*bd;
-      g.gain.setValueAtTime(0.35,t);g.gain.exponentialRampToValueAtTime(0.001,t+0.07);
-      o.start(t);o.stop(t+0.08);
-    }
-    setTimeout(res,4*bd*1000+50);
-  });
+  const ctx=getCtx();
+  const bd=60/cfg.tempo;
+  const beats=4;
+  const startAt=ctx.currentTime+0.1; // small buffer before first beat
+  for(let b=0;b<beats;b++){
+    const o=ctx.createOscillator(),g=ctx.createGain();
+    o.connect(g);g.connect(ctx.destination);
+    o.frequency.value=b===0?1320:880;
+    const t=startAt+b*bd;
+    g.gain.setValueAtTime(0,t);
+    g.gain.linearRampToValueAtTime(b===0?0.55:0.38,t+0.003);
+    g.gain.exponentialRampToValueAtTime(0.001,t+0.07);
+    o.start(t);o.stop(t+0.08);
+  }
+  // Wait until all beats have played
+  const waitMs=(startAt+beats*bd-ctx.currentTime)*1000;
+  await new Promise(res=>setTimeout(res,Math.max(0,waitMs)));
 }
 
 function startPlayback(withRec=false){
@@ -728,9 +743,12 @@ function startPlayback(withRec=false){
   if(maxDur===0)maxDur=60;
   tracks.forEach((t,i)=>{
     if(!t.buffer)return;if(t.state==='record'&&withRec)return;
-    const play=soloExists?t.state==='solo':t.state!=='mute';if(!play)return;
     const src=ctx.createBufferSource();src.buffer=t.buffer;
-    const gn=ctx.createGain();src.connect(gn);
+    const gn=ctx.createGain();
+    // Set initial gain based on mute/solo state
+    const shouldPlay=soloExists?t.state==='solo':t.state!=='mute';
+    gn.gain.value=shouldPlay?1:0;
+    src.connect(gn);
     if(cfg.fx){const ws=makeFX(ctx);gn.connect(ws);ws.connect(analyser);}else gn.connect(analyser);
     src.start(0,Math.min(playOffset,t.buffer.duration));
     tracks[i].src=src;tracks[i].gain=gn;
@@ -756,6 +774,18 @@ function stopPlayback(reset=true){
 
 function stopAll(reset=true){stopRecording();stopPlayback(reset);recArmed=false;document.getElementById('btn-rec').classList.remove('armed');}
 
+// Live mute/solo update — called whenever a track state changes during playback
+function applyLiveGains(){
+  if(!isPlaying)return;
+  const ctx=getCtx();
+  const soloExists=tracks.some(t=>t.state==='solo'&&t.gain);
+  tracks.forEach((t,i)=>{
+    if(!t.gain)return;
+    const shouldPlay=soloExists?t.state==='solo':t.state!=='mute';
+    t.gain.gain.setTargetAtTime(shouldPlay?1:0,ctx.currentTime,0.015);
+  });
+}
+
 function tick(){
   animId=requestAnimationFrame(()=>{
     if(!isPlaying&&!isRecording)return;
@@ -777,19 +807,44 @@ function tick(){
   });
 }
 
+// ── METRONOME (properly aligned scheduler) ──────────────────
+let metroNextBeat=0; // absolute actx time of next scheduled beat
+let metroTimerId=null;
+
 function startMetro(){
-  stopMetro();const bd=60/cfg.tempo;let next=actx.currentTime;
-  function sched(){
-    while(next<actx.currentTime+0.12){
-      const o=actx.createOscillator(),g=actx.createGain();o.connect(g);g.connect(actx.destination);
-      o.frequency.value=960;g.gain.setValueAtTime(0.28,next);g.gain.exponentialRampToValueAtTime(0.001,next+0.065);
-      o.start(next);o.stop(next+0.08);metNodes.push(o);next+=bd;
-    }
-    if(isPlaying||isRecording)setTimeout(sched,50);
-  }
-  sched();
+  stopMetro();
+  if(!actx||!cfg.metro)return;
+  const bd=60/cfg.tempo;
+  // Align first beat to current playOffset position in the bar
+  // Start scheduling from now with a small lookahead buffer
+  metroNextBeat=actx.currentTime+0.05;
+  scheduleMetre();
 }
-function stopMetro(){metNodes.forEach(n=>{try{n.stop();}catch(e){}});metNodes=[];}
+
+function scheduleMetre(){
+  if(!cfg.metro||((!isPlaying)&&(!isRecording))){stopMetro();return;}
+  const ctx=actx,bd=60/cfg.tempo,LOOKAHEAD=0.15;
+  while(metroNextBeat<ctx.currentTime+LOOKAHEAD){
+    const o=ctx.createOscillator(),g=ctx.createGain();
+    o.connect(g);g.connect(ctx.destination);
+    // Accent beat 1 of each bar (4/4)
+    const beatInBar=Math.round((metroNextBeat-playStartTime)/bd)%4;
+    o.frequency.value=beatInBar===0?1320:880;
+    const vel=beatInBar===0?0.45:0.28;
+    g.gain.setValueAtTime(0,metroNextBeat);
+    g.gain.linearRampToValueAtTime(vel,metroNextBeat+0.002);
+    g.gain.exponentialRampToValueAtTime(0.001,metroNextBeat+0.06);
+    o.start(metroNextBeat);o.stop(metroNextBeat+0.07);
+    metNodes.push(o);
+    metroNextBeat+=bd;
+  }
+  metroTimerId=setTimeout(scheduleMetre,50);
+}
+
+function stopMetro(){
+  if(metroTimerId){clearTimeout(metroTimerId);metroTimerId=null;}
+  metNodes.forEach(n=>{try{n.stop();}catch(e){}});metNodes=[];
+}
 
 function makeFX(ctx){
   const ws=ctx.createWaveShaper();
