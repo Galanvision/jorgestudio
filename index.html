@@ -512,23 +512,52 @@ function renderLanding(){
   });
 }
 function escHtml(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
-function saveStorage(){try{localStorage.setItem('vd-demos',JSON.stringify(demos));}catch(e){}}
+function saveStorage(){
+  // Sync track states into demos object before saving
+  if(curIdx>=0) demos[curIdx].states=tracks.map(t=>t.state);
+  try{
+    localStorage.setItem('vd-demos',JSON.stringify(demos));
+  }catch(e){
+    // Quota exceeded - audio data too large. Save metadata only, warn user.
+    console.warn('localStorage quota exceeded - saving metadata only');
+    const slim=demos.map(d=>({...d,audio:[null,null,null,null]}));
+    try{localStorage.setItem('vd-demos',JSON.stringify(slim));}catch(e2){}
+    setStatus('Storage full — export your tracks to save them');
+  }
+}
 
 document.getElementById('btn-new').onclick=()=>{
-  const d={name:`New Demo ${demos.length+1}`,date:new Date().toLocaleDateString('en-US',{month:'short',day:'numeric'}),tracks:[null,null,null,null],audio:[null,null,null,null]};
+  const d={name:`New Demo ${demos.length+1}`,date:new Date().toLocaleDateString('en-US',{month:'short',day:'numeric'}),tracks:[null,null,null,null],audio:[null,null,null,null],states:['playback','playback','playback','playback']};
   demos.push(d);saveStorage();openDemo(demos.length-1);
 };
 
 function openDemo(idx){
-  curIdx=idx;stopAll(true);
-  tracks=Array.from({length:4},()=>({state:'playback',buffer:null,waveform:null,src:null,gain:null}));
-  document.getElementById('demo-name').value=demos[idx].name;
+  curIdx=idx; stopAll(true);
+  const d=demos[idx];
+  // Restore track states (R/P/S/M) if previously saved, else default playback
+  tracks=Array.from({length:4},(_,i)=>({
+    state:(d.states&&d.states[i])||'playback',
+    buffer:null,waveform:null,src:null,gain:null
+  }));
+  document.getElementById('demo-name').value=d.name;
+  setStatus('Ready'); showPage('trackpage'); buildTracks();
+  // Decode audio async - draw waveforms as each one loads
   const ctx=getCtx();
-  demos[idx].audio.forEach((b64,i)=>{
-    if(!b64)return;
-    try{ctx.decodeAudioData(b64ToArr(b64)).then(ab=>{tracks[i].buffer=ab;tracks[i].waveform=mkWaveform(ab);drawWave(i,0);}).catch(()=>{});}catch(e){}
+  d.audio.forEach((b64,i)=>{
+    if(!b64) return;
+    try{
+      const arr=b64ToArr(b64);
+      ctx.decodeAudioData(arr).then(ab=>{
+        tracks[i].buffer=ab;
+        tracks[i].waveform=mkWaveform(ab);
+        maxDur=Math.max(maxDur,ab.duration);
+        drawWave(i,0);
+        // Refresh empty-label
+        const el=document.getElementById('el-'+i);
+        if(el) el.textContent='';
+      }).catch(e=>console.warn('decode failed track',i,e));
+    }catch(e){console.warn('b64 decode error',i,e);}
   });
-  setStatus('Ready');showPage('trackpage');buildTracks();
 }
 
 function showPage(id){
@@ -538,7 +567,7 @@ function showPage(id){
   if(id==='trackpage')tp.classList.add('page-enter');else tp.classList.remove('page-enter');
 }
 
-document.getElementById('btn-back').onclick=()=>{stopAll(true);showPage('landing');renderLanding();};
+document.getElementById('btn-back').onclick=()=>{saveStorage();stopAll(true);showPage('landing');renderLanding();};
 document.getElementById('demo-name').oninput=e=>{if(curIdx<0)return;demos[curIdx].name=e.target.value;saveStorage();};
 
 function buildTracks(){
@@ -580,7 +609,7 @@ function addScrubListeners(area){
   window.addEventListener('touchend',()=>{dragging=false;});
 }
 
-function cycleState(i){const cur=CYCLE.indexOf(tracks[i].state);tracks[i].state=CYCLE[(cur+1)%CYCLE.length];refreshTrack(i);applyLiveGains();}
+function cycleState(i){const cur=CYCLE.indexOf(tracks[i].state);tracks[i].state=CYCLE[(cur+1)%CYCLE.length];refreshTrack(i);applyLiveGains();saveStorage();}
 function refreshTrack(i){
   const t=tracks[i],div=document.getElementById(`track-${i}`);if(!div)return;
   div.className=`track ${T_CLASS[t.state]}`;
@@ -616,11 +645,6 @@ function drawWave(i,progress){
   const ph=document.getElementById(`ph-${i}`);
   if(ph){ph.style.display=progress>0?'block':'none';if(progress>0)ph.style.left=(progress*W)+'px';}
 }
-
-let recArmed=false;
-let overdubStartOffset=0;
-let recActxStartTime=0;
-let micSource=null,micAnalyser=null,micAnalyserData=null;
 
 async function spokenCountIn(){
   if(!window.speechSynthesis) return;
@@ -1053,6 +1077,7 @@ function arrToB64(arr){return new Promise(res=>{const blob=new Blob([arr]);const
 function b64ToArr(b64){const bin=atob(b64),buf=new ArrayBuffer(bin.length),v=new Uint8Array(buf);for(let i=0;i<bin.length;i++)v[i]=bin.charCodeAt(i);return buf;}
 
 renderLanding();showPage('landing');
+window.addEventListener('beforeunload',saveStorage);
 </script>
 </body>
 </html>
