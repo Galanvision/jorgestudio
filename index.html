@@ -623,60 +623,40 @@ let recActxStartTime=0;
 let micSource=null,micAnalyser=null,micAnalyserData=null;
 
 async function spokenCountIn(){
-  // Pre-load voices synchronously — must be called after user gesture
+  if(!window.speechSynthesis) return;
   let voices=speechSynthesis.getVoices();
-  if(voices.length===0){
+  if(!voices.length){
     await new Promise(r=>{
-      speechSynthesis.onvoiceschanged=()=>{voices=speechSynthesis.getVoices();r();};
-      setTimeout(r,800);
+      speechSynthesis.onvoiceschanged=r;
+      setTimeout(r,1000);
     });
     voices=speechSynthesis.getVoices();
   }
-
-  function pickVoice(){
-    // Prefer a female English voice; fall back to any English; fall back to first
-    return voices.find(v=>/samantha|victoria|karen|moira|tessa|fiona/i.test(v.name))
-      || voices.find(v=>/female/i.test(v.name)&&/en/i.test(v.lang))
-      || voices.find(v=>/en/i.test(v.lang))
-      || voices[0];
-  }
+  const voice=
+    voices.find(v=>/samantha|victoria|karen|moira|tessa|fiona/i.test(v.name))||
+    voices.find(v=>/en.US/i.test(v.lang)&&/female/i.test(v.name))||
+    voices.find(v=>/en/i.test(v.lang))||
+    voices[0]||null;
 
   const msPerBeat=(60/cfg.tempo)*1000;
-  // Rate: at 120bpm words must fit in ~500ms each. SpeechSynthesis rate 1 = ~120wpm.
-  // For single words "One"/"Two" rate=1 is fine; for the phrase scale with tempo.
-  const wordRate=Math.max(0.9,Math.min(2.0,cfg.tempo/90));
-  const phraseRate=Math.max(1.1,Math.min(2.5,(cfg.tempo/80)*1.2));
-  const voice=pickVoice();
 
-  function speak(text,rate){
-    return new Promise(res=>{
-      speechSynthesis.cancel(); // clear queue before each word
-      const u=new SpeechSynthesisUtterance(text);
-      u.rate=rate; u.pitch=1.2; u.volume=1;
-      if(voice)u.voice=voice;
-      u.onend=()=>res();
-      u.onerror=()=>res();
-      speechSynthesis.speak(u);
-      // Fallback: resolve after 1.5 beats max so we never hang
-      setTimeout(res, msPerBeat*1.5);
-    });
+  // One single cancel at the very start to clear any stale queue
+  speechSynthesis.cancel();
+  await new Promise(r=>setTimeout(r,80));
+
+  function q(text,rate){
+    const u=new SpeechSynthesisUtterance(text);
+    u.rate=rate; u.pitch=1.15; u.volume=1.0;
+    if(voice) u.voice=voice;
+    speechSynthesis.speak(u);
   }
 
-  // Speak each word/phrase then wait to fill the beat gap before the next
-  const t0=performance.now();
-  await speak('One', wordRate);
-  const elapsed1=performance.now()-t0;
-  await new Promise(r=>setTimeout(r, Math.max(0, msPerBeat-elapsed1)));
+  q('One',   1.0);
+  q('Two',   1.0);
+  q('One, two, three, four', Math.max(1.0,Math.min(2.2,cfg.tempo/80)));
 
-  const t1=performance.now()-t0;
-  await speak('Two', wordRate);
-  const elapsed2=performance.now()-t0;
-  await new Promise(r=>setTimeout(r, Math.max(0, msPerBeat*2-elapsed2)));
-
-  // "One two three four" fills beats 3-4 and acts as the "go" cue
-  await speak('One, two, three, four', phraseRate);
-  // Small buffer so the phrase finishes cleanly before record starts
-  await new Promise(r=>setTimeout(r,120));
+  // Wait the full 4-beat count-in duration plus tail
+  await new Promise(r=>setTimeout(r, msPerBeat*4+400));
 }
 
 async function startRecording(){
@@ -967,7 +947,6 @@ document.getElementById('btn-opts').onclick=()=>openModal('modal-opts');
 document.getElementById('pill-countin').onclick=()=>{
   cfg.countin=!cfg.countin;
   document.getElementById('pill-countin').classList.toggle('active',cfg.countin);
-  document.getElementById('tog-countin').classList.toggle('on',cfg.countin);
 };
 
 function openModal(id){document.getElementById(id).classList.add('open');}
