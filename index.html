@@ -479,7 +479,7 @@ let curIdx=-1;
 let tracks=Array.from({length:4},()=>({state:'playback',buffer:null,waveform:null,src:null,gain:null}));
 let actx=null,analyser=null,analyserData=null;
 let isPlaying=false,isRecording=false;
-let recMediaRec=null,recChunks=[],recTrack=-1;
+let recTrack=-1;
 let playStartTime=0,playOffset=0,maxDur=0;
 let animId=null,metNodes=[];
 const cfg={tempo:120,metro:false,countin:false,fx:false};
@@ -624,97 +624,145 @@ let micSource=null,micAnalyser=null,micAnalyserData=null;
 
 async function spokenCountIn(){
   if(!window.speechSynthesis) return;
-  let voices=speechSynthesis.getVoices();
-  if(!voices.length){
-    await new Promise(r=>{
-      speechSynthesis.onvoiceschanged=r;
-      setTimeout(r,1000);
-    });
-    voices=speechSynthesis.getVoices();
-  }
+  // Load voices - browsers are lazy
+  if(!speechSynthesis.getVoices().length)
+    await new Promise(r=>{speechSynthesis.onvoiceschanged=r;setTimeout(r,1200);});
+  const voices=speechSynthesis.getVoices();
   const voice=
     voices.find(v=>/samantha|victoria|karen|moira|tessa|fiona/i.test(v.name))||
-    voices.find(v=>/en.US/i.test(v.lang)&&/female/i.test(v.name))||
+    voices.find(v=>/en.US/i.test(v.lang))||
     voices.find(v=>/en/i.test(v.lang))||
     voices[0]||null;
-
   const msPerBeat=(60/cfg.tempo)*1000;
-
-  // One single cancel at the very start to clear any stale queue
-  speechSynthesis.cancel();
-  await new Promise(r=>setTimeout(r,80));
-
-  function q(text,rate){
-    const u=new SpeechSynthesisUtterance(text);
-    u.rate=rate; u.pitch=1.15; u.volume=1.0;
-    if(voice) u.voice=voice;
-    speechSynthesis.speak(u);
+  function u(text,rate){
+    const ut=new SpeechSynthesisUtterance(text);
+    ut.rate=rate;ut.pitch=1.1;ut.volume=1;
+    if(voice)ut.voice=voice;
+    return ut;
   }
-
-  q('One',   1.0);
-  q('Two',   1.0);
-  q('One, two, three, four', Math.max(1.0,Math.min(2.2,cfg.tempo/80)));
-
-  // Wait the full 4-beat count-in duration plus tail
-  await new Promise(r=>setTimeout(r, msPerBeat*4+400));
+  speechSynthesis.cancel();
+  await new Promise(r=>setTimeout(r,100));
+  speechSynthesis.speak(u('One',1));
+  speechSynthesis.speak(u('Two',1));
+  speechSynthesis.speak(u('One, two, three, four',Math.max(1,Math.min(2,cfg.tempo/80))));
+  await new Promise(r=>setTimeout(r,msPerBeat*4+600));
 }
 
-async function startRecording(){
-  const ctx=getCtx();if(ctx.state==='suspended')await ctx.resume();
-  const ri=tracks.findIndex(t=>t.state==='record');
-  if(ri<0){setStatus('Set a track to R first');document.getElementById('btn-rec').classList.remove('armed');recArmed=false;return;}
-  let stream;
-  try{stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:false,autoGainControl:false}});}
-  catch(e){setStatus('Microphone access denied');document.getElementById('btn-rec').classList.remove('armed');recArmed=false;return;}
+// ── SYNC ARCHITECTURE ──────────────────────────────────────
+// Instead of MediaRecorder (which has unpredictable startup latency),
+// we capture audio using a ScriptProcessorNode connected directly to
+// the Web Audio graph. This runs on the SAME clock as playback, giving
+// sample-accurate alignment with no compensation needed.
+let recBuffer=[];      // Float32Array chunks collected during recording
+let recScriptNode=null;
+let recActxStartTime=0;
+let recArmed=false;
+let micSource=null,micAnalyser=null,micAnalyserData=null;
 
+async function startRecording(){
+  const ctx=getCtx();
+  if(ctx.state==='suspended') await ctx.resume();
+  const ri=tracks.findIndex(t=>t.state==='record');
+  if(ri<0){
+    setStatus('Set a track to R first');
+    document.getElementById('btn-rec').classList.remove('armed');
+    recArmed=false; return;
+  }
+
+  let stream;
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({
+      audio:{echoCancellation:true,noiseSuppression:false,autoGainControl:false}
+    });
+  }catch(e){
+    setStatus('Microphone access denied');
+    document.getElementById('btn-rec').classList.remove('armed');
+    recArmed=false; return;
+  }
+
+  // Count-in BEFORE opening the recorder so it doesn't interfere with sync
   if(cfg.countin){
-    setStatus('Count-in…');
-    stopSources();stopMetro();
+    setStatus('Count-in\u2026');
+    stopSources(); stopMetro();
     await spokenCountIn();
   }
 
-  recTrack=ri;recChunks=[];
-  overdubStartOffset=playOffset;
-  const types=['audio/webm;codecs=opus','audio/webm','audio/ogg','audio/mp4'];
-  const mimeType=types.find(t=>MediaRecorder.isTypeSupported(t))||'';
-  recMediaRec=new MediaRecorder(stream,mimeType?{mimeType}:{});
-  recMediaRec.ondataavailable=e=>{if(e.data.size>0)recChunks.push(e.data);};
-  recMediaRec.onstop=()=>{
-    stream.getTracks().forEach(t=>t.stop());
-    if(micAnalyser){try{micAnalyser.disconnect();}catch(e){}micAnalyser=null;}
-    if(micSource){try{micSource.disconnect();}catch(e){}micSource=null;}
-    const blob=new Blob(recChunks,{type:mimeType||'audio/webm'});
-    blob.arrayBuffer().then(arr=>{
-      ctx.decodeAudioData(arr.slice(0)).then(ab=>{
-        const spliceAt=Math.max(0,recActxStartTime-playStartTime);
-        const newBuf=overdubMix(ctx,tracks[recTrack].buffer,ab,spliceAt);
-        tracks[recTrack].buffer=newBuf;
-        tracks[recTrack].waveform=mkWaveform(newBuf);
-        maxDur=Math.max(0,...tracks.map(t=>t.buffer?t.buffer.duration:0));
-        drawWave(recTrack,0);
-        encodeAndStore(ctx,newBuf,recTrack);
-      }).catch(()=>setStatus('Could not decode audio'));
-    });
-    isRecording=false;recArmed=false;
-    document.getElementById('btn-rec').classList.remove('armed');
-    setStatus('Ready');
+  recTrack=ri;
+  recBuffer=[];
+
+  // Connect mic stream into Web Audio so ScriptProcessor sees it
+  micSource=ctx.createMediaStreamSource(stream);
+
+  // Mic analyser for the input meter
+  micAnalyser=ctx.createAnalyser();
+  micAnalyser.fftSize=128;
+  micSource.connect(micAnalyser);
+  micAnalyserData=new Uint8Array(micAnalyser.frequencyBinCount);
+
+  // ScriptProcessorNode captures raw PCM on the audio thread clock
+  // bufferSize=4096 gives ~85ms chunks at 48kHz - small enough for good capture
+  recScriptNode=ctx.createScriptProcessor(4096,1,1);
+  micSource.connect(recScriptNode);
+  recScriptNode.connect(ctx.destination); // must be connected or it won't fire
+
+  recScriptNode.onaudioprocess=e=>{
+    // Clone the input buffer - it will be reused by the browser otherwise
+    recBuffer.push(new Float32Array(e.inputBuffer.getChannelData(0)));
   };
-  // Start recorder and stamp audio clock in the same microtask
-  recMediaRec.start(50);
+
+  // Stamp the audio clock NOW - same clock as playback sources we're about to start
   recActxStartTime=ctx.currentTime;
   isRecording=true;
-  // Wire up mic analyser for input meter
-  try{
-    micSource=ctx.createMediaStreamSource(stream);
-    micAnalyser=ctx.createAnalyser();micAnalyser.fftSize=128;
-    micSource.connect(micAnalyser);
-    micAnalyserData=new Uint8Array(micAnalyser.frequencyBinCount);
-  }catch(e){}
-  // Restart backing tracks from playOffset at the same moment
+  document.getElementById('btn-rec').classList.add('armed');
+
+  // Start backing tracks - playStartTime is set inside startPlayback
   startPlayback(true);
-  // If no backing tracks exist, still run tick for the meter and waveform
-  if(!isPlaying){playStartTime=actx.currentTime-playOffset;isPlaying=true;tick();}
+  if(!isPlaying){playStartTime=ctx.currentTime;isPlaying=true;tick();}
+
+  // Keep stream ref so we can close it later
+  recScriptNode._stream=stream;
   setStatus('<span class="rec-dot"></span> Recording Track '+(ri+1));
+}
+
+function stopRecording(){
+  if(!isRecording) return;
+  isRecording=false;
+  const ctx=actx;
+
+  // Tear down capture nodes
+  if(recScriptNode){
+    recScriptNode.onaudioprocess=null;
+    try{recScriptNode.disconnect();}catch(e){}
+    if(recScriptNode._stream)
+      recScriptNode._stream.getTracks().forEach(t=>t.stop());
+    recScriptNode=null;
+  }
+  if(micSource){try{micSource.disconnect();}catch(e){}micSource=null;}
+  if(micAnalyser){try{micAnalyser.disconnect();}catch(e){}micAnalyser=null;}
+
+  if(!recBuffer.length) return;
+
+  // Assemble all chunks into one AudioBuffer
+  const sr=ctx.sampleRate;
+  const totalSamples=recBuffer.reduce((a,c)=>a+c.length,0);
+  const newAudio=ctx.createBuffer(1,totalSamples,sr);
+  const dst=newAudio.getChannelData(0);
+  let pos=0;
+  for(const chunk of recBuffer){dst.set(chunk,pos);pos+=chunk.length;}
+
+  // Splice point: how far into the timeline were we when recording started?
+  const spliceAt=Math.max(0,recActxStartTime-playStartTime);
+  const newBuf=overdubMix(ctx,tracks[recTrack].buffer,newAudio,spliceAt);
+  tracks[recTrack].buffer=newBuf;
+  tracks[recTrack].waveform=mkWaveform(newBuf);
+  maxDur=Math.max(0,...tracks.map(t=>t.buffer?t.buffer.duration:0));
+  drawWave(recTrack,0);
+  encodeAndStore(ctx,newBuf,recTrack);
+
+  recBuffer=[];
+  recArmed=false;
+  document.getElementById('btn-rec').classList.remove('armed');
+  setStatus('Ready');
 }
 
 function overdubMix(ctx,existingBuf,newAudio,offsetSecs){
@@ -726,13 +774,13 @@ function overdubMix(ctx,existingBuf,newAudio,offsetSecs){
   const out=ctx.createBuffer(1,totalLen,sr);
   const outData=out.getChannelData(0);
   if(existingBuf){
-    const existData=existingBuf.getChannelData(0);
-    for(let i=0;i<Math.min(offsetFrames,existLen);i++) outData[i]=existData[i];
+    const ed=existingBuf.getChannelData(0);
+    for(let i=0;i<Math.min(offsetFrames,existLen);i++) outData[i]=ed[i];
     const punchOut=offsetFrames+newLen;
-    for(let i=punchOut;i<existLen;i++) outData[i]=existData[i];
+    for(let i=punchOut;i<existLen;i++) outData[i]=ed[i];
   }
-  const newData=newAudio.getChannelData(0);
-  for(let i=0;i<newLen;i++) outData[offsetFrames+i]=newData[i];
+  const nd=newAudio.getChannelData(0);
+  for(let i=0;i<newLen;i++) outData[offsetFrames+i]=nd[i];
   return out;
 }
 
@@ -745,23 +793,19 @@ function encodeAndStore(ctx,audioBuf,trackIdx){
   v.setUint32(24,sr,true);v.setUint32(28,sr*2,true);v.setUint16(32,2,true);v.setUint16(34,16,true);
   ws(36,'data');v.setUint32(40,len*2,true);
   const ch=audioBuf.getChannelData(0);let off=44;
-  for(let i=0;i<len;i++){const s=Math.max(-1,Math.min(1,ch[i]));v.setInt16(off,s<0?s*0x8000:s*0x7FFF,true);off+=2;}
+  for(let i=0;i<len;i++){
+    const s=Math.max(-1,Math.min(1,ch[i]));
+    v.setInt16(off,s<0?s*0x8000:s*0x7FFF,true);off+=2;
+  }
   const b64=arrayBufToB64(buf);
   if(curIdx>=0){demos[curIdx].audio[trackIdx]=b64;demos[curIdx].tracks[trackIdx]=true;saveStorage();}
 }
 function arrayBufToB64(buf){
   let bin='';const bytes=new Uint8Array(buf);
-  for(let i=0;i<bytes.byteLength;i++)bin+=String.fromCharCode(bytes[i]);
+  for(let i=0;i<bytes.byteLength;i++) bin+=String.fromCharCode(bytes[i]);
   return btoa(bin);
 }
 function fmtTime(s){const m=Math.floor(s/60);return `${m}:${String(Math.floor(s)%60).padStart(2,'0')}`;}
-
-function stopRecording(){
-  if(recMediaRec&&recMediaRec.state!=='inactive')recMediaRec.stop();
-  isRecording=false;
-  if(micAnalyser){try{micAnalyser.disconnect();}catch(e){}micAnalyser=null;}
-  if(micSource){try{micSource.disconnect();}catch(e){}micSource=null;}
-}
 
 
 function startPlayback(withRec=false){
@@ -801,7 +845,7 @@ function stopPlayback(reset=true){
   if(!isRecording)setStatus('Ready');
 }
 
-function stopAll(reset=true){stopRecording();stopPlayback(reset);recArmed=false;document.getElementById('btn-rec').classList.remove('armed');}
+function stopAll(reset=true){stopRecording();stopPlayback(reset);}
 
 // Live mute/solo update — called whenever a track state changes during playback
 function applyLiveGains(){
@@ -927,15 +971,10 @@ document.getElementById('btn-rec').onclick=async()=>{
   setStatus(recArmed?'Armed — press ▶ to record':'Ready');
 };
 document.getElementById('btn-play').onclick=async()=>{
-  if(isPlaying||isRecording){stopAll(false);return;}
-  if(recArmed){
-    const ri=tracks.findIndex(t=>t.state==='record');
-    if(ri<0){setStatus('Set a track to R first');return;}
-    startPlayback(true); // start other tracks playing first
-    await startRecording(); // then open mic (echo cancellation already active)
-  } else {
-    startPlayback(false);
-  }
+  if(isRecording){stopAll(false);return;}
+  if(isPlaying){stopPlayback(false);return;}
+  if(recArmed) await startRecording();
+  else startPlayback(false);
 };
 document.getElementById('btn-rw').onclick=()=>stopAll(true);
 document.getElementById('btn-ff').onclick=()=>{stopAll(false);playOffset=maxDur||0;};
@@ -1006,7 +1045,7 @@ function dlWav(ab,name){
     v.setInt16(off,smp<0?smp*0x8000:smp*0x7FFF,true);off+=2;
   }
   const url=URL.createObjectURL(new Blob([buf],{type:'audio/wav'}));
-  const a=document.createElement('a');a.href=url;a.download=name;a.click();
+  const a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();document.body.removeChild(a);
   setTimeout(()=>URL.revokeObjectURL(url),4000);
 }
 function setStatus(html){document.getElementById('status-bar').innerHTML=html;}
