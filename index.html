@@ -462,9 +462,29 @@ html, body {
     <div class="modal-handle"></div>
     <div class="modal-title">Demo Options</div>
     <div class="modal-row" id="opt-rename"><div><div class="modal-row-label">Rename Demo</div></div></div>
+    <div class="modal-row" id="opt-sync"><div><div class="modal-row-label">Sync &amp; Timing</div><div class="modal-row-sub">Automatic — adjust only if needed</div></div><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></div>
     <div class="modal-row" id="opt-clear"><div><div class="modal-row-label" style="color:var(--red)">Clear All Tracks</div><div class="modal-row-sub">Erases all recorded audio</div></div></div>
     <button class="modal-btn cancel" id="close-opts">Cancel</button>
   </div>
+</div>
+
+<div class="modal-overlay" id="modal-sync">
+  <div class="modal-sheet">
+    <div class="modal-handle"></div>
+    <div class="modal-title">Sync &amp; Timing</div>
+    <div class="modal-note">Timing is adjusted <b>automatically</b> for your device — you shouldn't need to change anything. If overdubs still land slightly late or early, switch to Manual and nudge until layered tracks lock up.</div>
+    <div class="modal-row" id="opt-automode"><div><div class="modal-row-label">Auto (recommended)</div><div class="modal-row-sub" id="auto-detail">Detecting your device latency…</div></div><div class="toggle on" id="tog-auto"></div></div>
+    <div id="manual-wrap" style="display:none;">
+      <div style="text-align:center;margin:16px 0 6px;">
+        <span id="lat-readout" style="font-size:34px;font-weight:600;font-variant-numeric:tabular-nums;">0 ms</span>
+      </div>
+      <input type="range" id="lat-slider" min="0" max="500" step="5" value="0"
+        style="width:100%;margin:6px 0 14px;accent-color:var(--purple);" />
+      <div class="modal-row" id="opt-autocal"><div><div class="modal-row-label">Measure Automatically</div><div class="modal-row-sub">Plays a click &amp; listens — hold phone speaker near a quiet room</div></div><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg></div>
+    </div>
+    <button class="modal-btn" id="close-sync">Done</button>
+  </div>
+
 </div>
 
 <script>
@@ -680,6 +700,43 @@ let recScriptNode=null;
 let recActxStartTime=0;
 let recArmed=false;
 let micSource=null,micAnalyser=null,micAnalyserData=null;
+let recInputLatency=0;     // mic input latency in seconds (from track settings)
+let recFirstChunkTime=0;   // ctx.currentTime when first audio chunk actually arrived
+
+// ── AUTOMATIC LATENCY COMPENSATION ────────────────────────────────────
+// Goal: plug-and-play. We compute total round-trip latency automatically.
+// `manualTrimMs` is an OPTIONAL user fine-tune on top of the auto value.
+// When it's the sentinel value (NaN / 'auto'), we use pure auto-detection.
+let savedTrim = localStorage.getItem('vd-trim-ms');
+let manualTrimMs = (savedTrim===null || savedTrim==='auto') ? null : parseFloat(savedTrim);
+
+// Detect platform to pick a sensible default output latency when the browser
+// refuses to report one (iOS Safari almost always reports 0).
+function detectDefaultLatencyMs(){
+  const ua = navigator.userAgent || '';
+  const isIOS = /iPad|iPhone|iPod/.test(ua) || (navigator.platform==='MacIntel' && navigator.maxTouchPoints>1);
+  const isAndroid = /Android/.test(ua);
+  if(isIOS) return 130;      // measured typical iPhone speaker->mic round trip
+  if(isAndroid) return 150;  // Android varies more, slightly higher baseline
+  return 90;                 // desktop/laptop built-in speakers+mic
+}
+
+// Compute the best automatic latency estimate (seconds) for the current device.
+// Prefers real browser-reported values; falls back to platform default.
+function computeAutoLatencySec(ctx){
+  const sr = ctx.sampleRate || 48000;
+  const procDelay = 4096 / sr;          // ScriptProcessor inherent buffer delay
+  const out = (ctx.outputLatency || 0); // real output latency if available
+  const base = (ctx.baseLatency || 0);  // additional graph latency
+  const inLat = recInputLatency || 0;   // mic input latency if reported
+
+  // If the browser gives us a real, non-trivial output latency, trust it.
+  if(out > 0.005){
+    return out + base + inLat + procDelay;
+  }
+  // Otherwise the platform isn't reporting — use a tuned default.
+  return (detectDefaultLatencyMs()/1000) + procDelay;
+}
 
 async function startRecording(){
   const ctx=getCtx();
@@ -694,13 +751,20 @@ async function startRecording(){
   let stream;
   try{
     stream=await navigator.mediaDevices.getUserMedia({
-      audio:{echoCancellation:true,noiseSuppression:false,autoGainControl:false}
+      audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}
     });
   }catch(e){
     setStatus('Microphone access denied');
     document.getElementById('btn-rec').classList.remove('armed');
     recArmed=false; return;
   }
+
+  // Read the actual input latency the browser reports for this mic track
+  recInputLatency = 0;
+  try{
+    const settings = stream.getAudioTracks()[0].getSettings();
+    if(settings && typeof settings.latency === 'number') recInputLatency = settings.latency;
+  }catch(e){}
 
   // Count-in BEFORE opening the recorder so it doesn't interfere with sync
   if(cfg.countin){
@@ -711,6 +775,7 @@ async function startRecording(){
 
   recTrack=ri;
   recBuffer=[];
+  recFirstChunkTime=0;
 
   // Connect mic stream into Web Audio so ScriptProcessor sees it
   micSource=ctx.createMediaStreamSource(stream);
@@ -722,13 +787,19 @@ async function startRecording(){
   micAnalyserData=new Uint8Array(micAnalyser.frequencyBinCount);
 
   // ScriptProcessorNode captures raw PCM on the audio thread clock
-  // bufferSize=4096 gives ~85ms chunks at 48kHz - small enough for good capture
   recScriptNode=ctx.createScriptProcessor(4096,1,1);
   micSource.connect(recScriptNode);
-  recScriptNode.connect(ctx.destination); // must be connected or it won't fire
+  // Connect through a silent gain so the node fires WITHOUT routing mic to speakers
+  const silentSink = ctx.createGain();
+  silentSink.gain.value = 0;
+  recScriptNode.connect(silentSink);
+  silentSink.connect(ctx.destination);
+  recScriptNode._sink = silentSink;
 
   recScriptNode.onaudioprocess=e=>{
-    // Clone the input buffer - it will be reused by the browser otherwise
+    // Record the precise audio-clock time the very first chunk arrives.
+    // This captures the real input-path delay relative to recording start.
+    if(recFirstChunkTime===0) recFirstChunkTime = ctx.currentTime;
     recBuffer.push(new Float32Array(e.inputBuffer.getChannelData(0)));
   };
 
@@ -754,6 +825,7 @@ function stopRecording(){
   if(recScriptNode){
     recScriptNode.onaudioprocess=null;
     try{recScriptNode.disconnect();}catch(e){}
+    if(recScriptNode._sink){try{recScriptNode._sink.disconnect();}catch(e){}}
     if(recScriptNode._stream)
       recScriptNode._stream.getTracks().forEach(t=>t.stop());
     recScriptNode=null;
@@ -771,12 +843,46 @@ function stopRecording(){
   let pos=0;
   for(const chunk of recBuffer){dst.set(chunk,pos);pos+=chunk.length;}
 
-  // Splice point: elapsed time from playback start to when recorder was stamped,
-  // minus one ScriptProcessor buffer period (the inherent capture delay).
-  const bufDelaySec = 4096 / (ctx.sampleRate || 48000);
-  const rawSplice = recActxStartTime - playStartTime;
-  const spliceAt = Math.max(0, rawSplice - bufDelaySec);
-  const newBuf=overdubMix(ctx,tracks[recTrack].buffer,newAudio,spliceAt);
+  // ── LATENCY COMPENSATION ──────────────────────────────────────────────
+  // The recorded audio lands LATE relative to the backing track because of:
+  //   1. OUTPUT latency: delay between source.start() and sound leaving speaker
+  //   2. INPUT latency:  delay between sound hitting mic and chunk arriving here
+  // The performer reacts to what they HEAR (already output-delayed) and their
+  // performance is captured after INPUT delay. Total shift = output + input.
+  //
+  // We pull the recorded audio EARLIER by this total round-trip latency so it
+  // lands where the performer actually intended it relative to the backing.
+  // Automatic latency estimate for this device (seconds)
+  const autoLatency = computeAutoLatencySec(ctx);
+  // If the user has set a manual fine-tune, it REPLACES the auto value;
+  // otherwise we run fully automatic.
+  const totalLatency = (manualTrimMs===null)
+    ? autoLatency
+    : (manualTrimMs/1000);
+
+  // Where recording "started" on the timeline, shifted earlier by latency
+  const rawStart = recActxStartTime - playStartTime;
+  const spliceAt = Math.max(0, rawStart - totalLatency);
+
+  // If compensation would push audio before t=0, trim the front of the recording
+  // instead so we don't lose the performer's intended downbeat
+  let trimmedAudio = newAudio;
+  const wantedShift = rawStart - totalLatency;
+  if(wantedShift < 0){
+    const trimFrames = Math.min(newAudio.length-1, Math.round(-wantedShift * sr));
+    if(trimFrames > 0){
+      const tb = ctx.createBuffer(1, newAudio.length - trimFrames, sr);
+      tb.getChannelData(0).set(newAudio.getChannelData(0).subarray(trimFrames));
+      trimmedAudio = tb;
+    }
+  }
+
+  console.log('[VoiceDemos sync] auto=%sms manual=%s total=%sms splice=%ss',
+    (autoLatency*1000).toFixed(1),
+    (manualTrimMs===null?'(auto)':manualTrimMs+'ms'),
+    (totalLatency*1000).toFixed(1), spliceAt.toFixed(3));
+
+  const newBuf=overdubMix(ctx,tracks[recTrack].buffer,trimmedAudio,spliceAt);
   tracks[recTrack].buffer=newBuf;
   tracks[recTrack].waveform=mkWaveform(newBuf);
   maxDur=Math.max(0,...tracks.map(t=>t.buffer?t.buffer.duration:0));
@@ -1014,7 +1120,7 @@ document.getElementById('pill-countin').onclick=()=>{
 
 function openModal(id){document.getElementById(id).classList.add('open');}
 function closeModal(id){document.getElementById(id).classList.remove('open');}
-['modal-tempo','modal-fx','modal-export','modal-opts'].forEach(id=>{
+['modal-tempo','modal-fx','modal-export','modal-opts','modal-sync'].forEach(id=>{
   document.getElementById(id).addEventListener('click',e=>{if(e.target===e.currentTarget)closeModal(id);});
 });
 
@@ -1027,6 +1133,124 @@ document.getElementById('exp-mix').onclick=async()=>{closeModal('modal-export');
 document.getElementById('exp-stems').onclick=async()=>{closeModal('modal-export');await doExport('stems');};
 document.getElementById('close-opts').onclick=()=>closeModal('modal-opts');
 document.getElementById('opt-rename').onclick=()=>{closeModal('modal-opts');document.getElementById('demo-name').focus();};
+
+// ── SYNC & TIMING ─────────────────────────────────────────
+function refreshSyncModal(){
+  const isAuto = (manualTrimMs===null);
+  document.getElementById('tog-auto').classList.toggle('on', isAuto);
+  document.getElementById('manual-wrap').style.display = isAuto ? 'none' : 'block';
+  // Show the detected auto latency
+  const ctx=getCtx();
+  const autoMs=Math.round(computeAutoLatencySec(ctx)*1000);
+  document.getElementById('auto-detail').textContent =
+    'Detected ~'+autoMs+' ms round-trip on this device';
+  if(!isAuto){
+    const sl=document.getElementById('lat-slider');
+    sl.value=manualTrimMs;
+    document.getElementById('lat-readout').textContent=Math.round(manualTrimMs)+' ms';
+  }
+}
+
+document.getElementById('opt-sync').onclick=()=>{
+  closeModal('modal-opts');
+  refreshSyncModal();
+  openModal('modal-sync');
+};
+
+// Toggle between Auto and Manual
+document.getElementById('tog-auto').onclick=()=>{
+  if(manualTrimMs===null){
+    // Switching to manual — seed slider with the current auto estimate
+    const ctx=getCtx();
+    manualTrimMs=Math.round(computeAutoLatencySec(ctx)*1000);
+  }else{
+    // Switching back to auto
+    manualTrimMs=null;
+  }
+  localStorage.setItem('vd-trim-ms', manualTrimMs===null?'auto':String(manualTrimMs));
+  refreshSyncModal();
+};
+
+document.getElementById('lat-slider').oninput=e=>{
+  manualTrimMs=parseFloat(e.target.value);
+  document.getElementById('lat-readout').textContent=Math.round(manualTrimMs)+' ms';
+};
+document.getElementById('close-sync').onclick=()=>{
+  localStorage.setItem('vd-trim-ms', manualTrimMs===null?'auto':String(manualTrimMs));
+  closeModal('modal-sync');
+};
+
+// Optional measurement: emit a sharp click, record it back, measure the delay
+document.getElementById('opt-autocal').onclick=async()=>{
+  const ctx=getCtx();
+  if(ctx.state==='suspended') await ctx.resume();
+  const readout=document.getElementById('lat-readout');
+  let stream;
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
+  }catch(e){ readout.textContent='Mic needed'; return; }
+  readout.textContent='Listening…';
+
+  const sr=ctx.sampleRate;
+  const src=ctx.createMediaStreamSource(stream);
+  const proc=ctx.createScriptProcessor(2048,1,1);
+  const sink=ctx.createGain();sink.gain.value=0;
+  src.connect(proc);proc.connect(sink);sink.connect(ctx.destination);
+
+  let captured=[];
+  let clickTime=0;
+  let measuring=true;
+  proc.onaudioprocess=ev=>{
+    if(!measuring)return;
+    captured.push({t:ctx.currentTime,data:new Float32Array(ev.inputBuffer.getChannelData(0))});
+  };
+
+  // Wait a moment for input to stabilize, then emit the click
+  await new Promise(r=>setTimeout(r,250));
+  const osc=ctx.createOscillator();const env=ctx.createGain();
+  osc.connect(env);env.connect(ctx.destination);
+  osc.frequency.value=2000;
+  clickTime=ctx.currentTime+0.05;
+  env.gain.setValueAtTime(0,clickTime);
+  env.gain.linearRampToValueAtTime(1.0,clickTime+0.001);
+  env.gain.exponentialRampToValueAtTime(0.001,clickTime+0.03);
+  osc.start(clickTime);osc.stop(clickTime+0.04);
+
+  // Record for 600ms after the click to catch its echo
+  await new Promise(r=>setTimeout(r,650));
+  measuring=false;
+  proc.onaudioprocess=null;
+  try{proc.disconnect();sink.disconnect();src.disconnect();}catch(e){}
+  stream.getTracks().forEach(t=>t.stop());
+
+  // Find the loudest peak in the captured audio AFTER the click was emitted
+  let peakTime=0,peakVal=0;
+  for(const chunk of captured){
+    if(chunk.t < clickTime) continue; // ignore anything before the click
+    const d=chunk.data;
+    for(let i=0;i<d.length;i++){
+      const a=Math.abs(d[i]);
+      if(a>peakVal){
+        peakVal=a;
+        // approximate time of this sample within the chunk
+        peakTime=chunk.t + (i/sr);
+      }
+    }
+  }
+
+  if(peakVal>0.05 && peakTime>clickTime){
+    const measuredLatency=(peakTime-clickTime)*1000; // ms
+    manualTrimMs=Math.max(0,Math.min(500,Math.round(measuredLatency)));
+    document.getElementById('lat-slider').value=manualTrimMs;
+    readout.textContent=Math.round(manualTrimMs)+' ms';
+    localStorage.setItem('vd-trim-ms',String(manualTrimMs));
+    // Measurement implies manual mode is now active
+    document.getElementById('tog-auto').classList.remove('on');
+    document.getElementById('manual-wrap').style.display='block';
+  }else{
+    readout.textContent='Try again louder';
+  }
+};
 document.getElementById('opt-clear').onclick=()=>{
   if(!confirm('Clear all recorded audio from this demo?'))return;
   closeModal('modal-opts');
